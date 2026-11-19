@@ -77,12 +77,18 @@ static const char *said(uint32_t a) {
 
 static void show_last(void);
 static void show_more(int count);
+static void big_lock_report(void);
+static void prof_register(CPU *c);
+static int prof_index(CPU *c);
+static const char *volatile prof_in[64];
+static void import_stat(const char *name, uint64_t ns);
 static void on_usr1(int sig);
 static void on_term(int sig) {
     (void)sig;
     extern void dr_bridge_report_unimplemented(uint32_t top);
     signal(SIGALRM, SIG_DFL); alarm(2);   // the report prints from a signal handler: if another thread holds stdout, die anyway
     dr_bridge_report_unimplemented(80);
+    big_lock_report();
     fflush(stdout);
     _exit(143);
 }
@@ -189,7 +195,72 @@ static void big_make(void) {
     pthread_mutex_init(&big, &a);
 }
 static _Thread_local int big_depth;
-static void big_lock(void) { pthread_once(&big_once, big_make); pthread_mutex_lock(&big); big_depth++; }
+// How long threads wait for the lock, and what the thread holding it was doing (DR_LOCK_STATS, printed when a run
+// is stopped): the engine thread spent its time here, not in its own code.
+static const char *volatile big_holder_what;
+static _Thread_local const char *cur_import_name;   // set by unimpl_import for the import about to run
+static struct { const char *what; uint64_t ns, n; } big_waits[64];
+static uint64_t big_wait_total;
+static int lock_stats = -1;
+static void big_lock(void) {
+    pthread_once(&big_once, big_make);
+    if (lock_stats < 0) lock_stats = getenv("DR_LOCK_STATS") != NULL;
+    if (lock_stats && big_depth == 0 && pthread_mutex_trylock(&big) != 0) {
+        const char *what = big_holder_what;
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        pthread_mutex_lock(&big);
+        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+        big_wait_total += dt;
+        for (int k = 0; k < 64; k++)
+            if (!big_waits[k].what || big_waits[k].what == what) { big_waits[k].what = what ? what : "(no import)"; big_waits[k].ns += dt; big_waits[k].n++; break; }
+    } else {
+        pthread_mutex_lock(&big);
+    }
+    big_depth++;
+}
+// DR_IMPORT_STATS: calls and time per import (printed when a run is stopped), and the time since start, to see
+// whether the bridge or the translated code is where a slow stretch goes. Time includes guest code the bridge
+// runs for the import (callbacks), so a host call that calls back counts its callbacks too.
+static struct { const char *name; uint64_t ns, n; } istat[4096];
+static pthread_mutex_t istat_mx = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t istat_t0;
+static void import_stat(const char *name, uint64_t ns) {
+    pthread_mutex_lock(&istat_mx);
+    if (!istat_t0) istat_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    uint32_t h = 2166136261u; for (const char *q = name; *q; q++) h = (h ^ (uint8_t)*q) * 16777619u;
+    for (uint32_t i = h & 4095, k = 0; k < 4096; i = (i + 1) & 4095, k++)
+        if (!istat[i].name || istat[i].name == name) { istat[i].name = name; istat[i].ns += ns; istat[i].n++; break; }
+    pthread_mutex_unlock(&istat_mx);
+}
+static void import_report(void) {
+    if (!istat_t0) return;
+    uint64_t all = 0, calls = 0;
+    for (int i = 0; i < 4096; i++) { all += istat[i].ns; calls += istat[i].n; }
+    fprintf(stderr, "  [imports] %llu calls, %.1f s inside them (all threads), over %.1f s of run:\n", (unsigned long long)calls, all / 1e9,
+            (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - istat_t0) / 1e9);
+    for (int r = 0; r < 25; r++) {
+        int best = -1;
+        for (int i = 0; i < 4096; i++) if (istat[i].ns && (best < 0 || istat[i].ns > istat[best].ns)) best = i;
+        if (best < 0) break;
+        fprintf(stderr, "    %8.2f s  %10llu calls  %7.2f us each  %s\n", istat[best].ns / 1e9, (unsigned long long)istat[best].n,
+                istat[best].ns / 1e3 / istat[best].n, istat[best].name);
+        istat[best].ns = 0;
+    }
+}
+static void prof_report(void);
+static void big_lock_report(void) {
+    import_report();
+    prof_report();
+    if (!lock_stats) return;
+    fprintf(stderr, "  [lock] %.1f s waited for the bridge's lock in all; held by a thread in:\n", big_wait_total / 1e9);
+    for (int r = 0; r < 15; r++) {
+        int best = -1;
+        for (int k = 0; k < 64; k++) if (big_waits[k].ns && (best < 0 || big_waits[k].ns > big_waits[best].ns)) best = k;
+        if (best < 0) break;
+        fprintf(stderr, "    %8.2f s  %8llu waits  %s\n", big_waits[best].ns / 1e9, (unsigned long long)big_waits[best].n, big_waits[best].what);
+        big_waits[best].ns = 0;
+    }
+}
 static void big_unlock(void) { big_depth--; pthread_mutex_unlock(&big); }
 static int big_release_all(void) { int d = big_depth; while (big_depth) big_unlock(); return d; }
 static void big_reacquire(int d) { while (big_depth < d) big_lock(); }
@@ -247,7 +318,9 @@ static void import(CPU *c, uint32_t thunk) {
     D->tail_jump = false;
     uint32_t sp_before = c->esp, ret_before = rd32(c->esp);
     big_lock();
+    big_holder_what = cur_import_name;
     bool ok = D->on_import && D->on_import(D, thunk, D->user);
+    big_holder_what = NULL;
     big_unlock();
     if (!ok) stop(D->exited ? DR_HALT_EXIT : D->threw ? DR_ERR_THROW : DR_ERR_IMPORT);
     in();
@@ -496,7 +569,16 @@ void unimpl_import(CPU *c, const char *name) {
         fprintf(stderr, "  [aot] import %s has no thunk (its pointer holds 0x%08x), called from %s\n", name, thunk, rt_func_name(c->fn));
         stop(DR_ERR_IMPORT);
     }
+    cur_import_name = name;
+    static _Thread_local int pidx = -2;
+    if (pidx == -2) pidx = getenv("DR_PROFILE") ? prof_index(c) : -1;
+    if (pidx >= 0) prof_in[pidx] = name;
+    static int istats = -1;
+    if (istats < 0) istats = getenv("DR_IMPORT_STATS") != NULL;
+    uint64_t t0 = istats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
     import(c, thunk);
+    if (istats) import_stat(name, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+    if (pidx >= 0) prof_in[pidx] = NULL;
     last[slot].eax = c->eax;
     if (!dull(name)) {
         unsigned m = nmore++ % NMORE;
@@ -549,6 +631,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     main_cpu = cpu;
     Dt = cpu;
     Gt = &main_G;
+    prof_register(&main_G);
     memset(&G, 0, sizeof G);
     G.fcw = 0x37F; G.mxcsr = 0x1F80;
     G.stack_hi = DR_STACK_TOP; G.stack_lo = DR_STACK_TOP - DR_STACK_SIZE;
@@ -705,8 +788,68 @@ dr_status dr_cpu_call_nested2(dr_cpu *given, uint32_t func, const uint32_t *args
 
 // ---- for threads.c ----
 // A guest stack and a CPU that starts at its top.
+// DR_PROFILE: a thread that looks every millisecond at which guest function each guest thread last entered, and
+// counts it (printed when a run is stopped, per thread with more than a few samples). The function is the last
+// one ENTERED: a sample inside a loop of a function that has called others since is credited to the last callee.
+#define NPROF_CPU 64
+static CPU *prof_cpus[NPROF_CPU];
+static int nprof_cpus;
+static struct { uint32_t fn; uint32_t n; } *prof_hist[NPROF_CPU];   // open addressing, 8192 slots each
+static const char *volatile prof_in[64];   // the import the thread is inside, if any (64 = NPROF_CPU)
+static struct { const char *name; uint32_t n; } prof_imp[NPROF_CPU][64];
+static int prof_index(CPU *c) { for (int t = 0; t < nprof_cpus && t < NPROF_CPU; t++) if (prof_cpus[t] == c) return t; return -1; }
+static uint32_t prof_total[NPROF_CPU];
+static void prof_add(int t, uint32_t fn) {
+    if (!prof_hist[t]) prof_hist[t] = calloc(8192, sizeof *prof_hist[t]);
+    for (uint32_t i = (fn * 2654435761u) >> 19, k = 0; k < 8192; i = (i + 1) & 8191, k++)
+        if (!prof_hist[t][i].fn || prof_hist[t][i].fn == fn) { prof_hist[t][i].fn = fn; prof_hist[t][i].n++; break; }
+    prof_total[t]++;
+}
+static void *prof_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        usleep(1000);
+        for (int t = 0; t < nprof_cpus; t++) {
+            if (!prof_cpus[t] || !prof_cpus[t]->fn) continue;
+            prof_add(t, prof_cpus[t]->fn);
+            const char *in = prof_in[t];
+            if (in) for (int k = 0; k < 64; k++)
+                if (!prof_imp[t][k].name || prof_imp[t][k].name == in) { prof_imp[t][k].name = in; prof_imp[t][k].n++; break; }
+        }
+    }
+    return NULL;
+}
+static void prof_register(CPU *c) {
+    static int on = -1;
+    if (on < 0) { on = getenv("DR_PROFILE") != NULL; if (on) { pthread_t th; pthread_create(&th, NULL, prof_thread, NULL); } }
+    if (!on) return;
+    int k = __atomic_fetch_add(&nprof_cpus, 1, __ATOMIC_SEQ_CST);
+    if (k < NPROF_CPU) prof_cpus[k] = c;
+}
+static void prof_report(void) {
+    for (int t = 0; t < nprof_cpus && t < NPROF_CPU; t++) {
+        if (prof_total[t] < 200) continue;
+        fprintf(stderr, "  [profile] guest thread %d: %u samples\n", t, prof_total[t]);
+        for (int r = 0; r < 15; r++) {
+            int best = -1;
+            for (int i = 0; i < 8192; i++) if (prof_hist[t][i].n && (best < 0 || prof_hist[t][i].n > prof_hist[t][best].n)) best = i;
+            if (best < 0) break;
+            fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * prof_hist[t][best].n / prof_total[t], rt_func_name(prof_hist[t][best].fn));
+            prof_hist[t][best].n = 0;
+        }
+        for (int r = 0; r < 6; r++) {
+            int best = -1;
+            for (int k = 0; k < 64; k++) if (prof_imp[t][k].n && (best < 0 || prof_imp[t][k].n > prof_imp[t][best].n)) best = k;
+            if (best < 0) break;
+            fprintf(stderr, "    %5.1f%%  inside import %s\n", 100.0 * prof_imp[t][best].n / prof_total[t], prof_imp[t][best].name);
+            prof_imp[t][best].n = 0;
+        }
+    }
+}
+
 CPU *cpu_new(uint32_t stack_size) {
     CPU *c = calloc(1, sizeof *c);
+    prof_register(c);
     stack_size = (stack_size + 0xFFFFu) & ~0xFFFFu;
     big_lock();
     uint32_t lo = dr_guest_alloc(main_cpu->g, stack_size, PROT_READ | PROT_WRITE);

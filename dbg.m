@@ -30,6 +30,9 @@ void dbg_init(void) {
                         if (!strcmp(class_getName(k), "NSWindow")) break;
                     }
                 }
+                // a first click on a window that is not key only makes it key (a web view does not take the first
+                // mouse): make it key first, as a person's first click would have
+                if (!w.isKeyWindow) [w makeKeyWindow];
                 NSPoint pt = NSMakePoint(x, w.contentView.bounds.size.height - y);
                 for (int k = 0; k < 2; k++) {
                     NSEvent *e = [NSEvent mouseEventWithType:k ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDown location:pt
