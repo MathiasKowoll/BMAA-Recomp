@@ -1,1 +1,4 @@
 # Guest functions replaced by native ones: "address name [outside]" per line.
+# The two that DecompRecomp's reference invocation skips (--skip-func), see game.c.
+1c05da0 skip_1c05da0
+1b9b190 skip_1b9b190

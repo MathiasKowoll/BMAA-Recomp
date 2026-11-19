@@ -7,7 +7,7 @@ FW        = ../Recomp-Framework
 PYTHON    = .venv/bin/python
 GAME_BIN  = orig.bin
 TEXT_LO   = c2d0
-TEXT_HI   = 2901549
+TEXT_HI   = 290be29
 HLE       = hle.txt
 APP_NAME  = BMAA
 GAME_SRC  = game32.c
@@ -15,3 +15,61 @@ include $(FW)/mac32/mac32.mk
 
 .venv:
 	python3 -m venv .venv && .venv/bin/pip install -q capstone lief
+
+# ---- The same translated code as the CPU of DecompRecomp's runtime (aot.c) ----
+# make dr      build/dr-bmaa: DecompRecomp's loader, bridge and driver (all of its sources but the interpreter),
+#              with the translated functions answering its CPU interface.
+# make interp  build/dr-interp: the same runtime on DecompRecomp's own interpreter, as the reference.
+#
+# DecompRecomp is used from its folder and never changed. One thing of it is built differently here, on copies
+# made at build time: the guest heap is 1 GB, not 512 MB (four more size classes of the same formula). With its
+# interpreter the game never got far enough to need more; with translated code it fills 512 MB while it loads.
+DR      = ../DecompRecomp/runtime
+DR_C    = guest macho32 vfs objc cxxshim cxxstring carbon glcontext cbtramp cfbridge testgl bridge dr_run gfx
+DR_M    = appkit glcore objcinvoke
+DR_OBJ  = $(patsubst %,$(BUILD)/dr/%.o,$(DR_C) $(DR_M))
+DR_INC  = $(BUILD)/dr-src/include
+DR_HDR  = $(BUILD)/dr-src/stamp
+DR_FLAGS = -O2 -g -arch arm64 -std=c11 -Wall -Wextra -Wno-unused-parameter -I$(DR_INC)
+$(DR_HDR): $(wildcard $(DR)/include/*.h) $(DR)/src/guest.c Makefile
+	@mkdir -p $(DR_INC)
+	cp $(DR)/include/*.h $(DR_INC)/
+	sed -i '' 's/^#define DR_HEAP_SIZE 0x20000000u.*/#define DR_HEAP_SIZE 0x40000000u \/* 1 GB (BMAA-Recomp) *\//' $(DR_INC)/dr_guest.h
+	grep -q 'DR_HEAP_SIZE 0x40000000u' $(DR_INC)/dr_guest.h
+	sed 's/^#define HEAP_NCLASES 141u/#define HEAP_NCLASES 145u/' $(DR)/src/guest.c > $(BUILD)/dr-src/guest.c
+	grep -q 'HEAP_NCLASES 145u' $(BUILD)/dr-src/guest.c
+	touch $@
+$(BUILD)/dr/guest.o: $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(DR_FLAGS) -c $(BUILD)/dr-src/guest.c -o $@
+$(BUILD)/dr/%.o: $(DR)/src/%.c $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(DR_FLAGS) -c $< -o $@
+$(BUILD)/dr/%.o: $(DR)/src/%.m $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(DR_FLAGS) -fobjc-arc -c $< -o $@
+# The driver calls the bridge through trace.c in both programs, so that their calls can be compared.
+$(BUILD)/dr/dr_run.o: $(DR)/src/dr_run.c $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(DR_FLAGS) -Ddr_bridge_dispatch=traced_dispatch -c $< -o $@
+$(BUILD)/dr/trace.o: trace.c $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -I$(DR_INC) -c trace.c -o $@
+$(BUILD)/dr/x86.o: $(DR)/src/x86.c $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(DR_FLAGS) -c $< -o $@
+$(BUILD)/dr-interp: $(DR_OBJ) $(BUILD)/dr/x86.o $(BUILD)/dr/trace.o
+	$(CC) -arch arm64 $^ -lobjc -framework Foundation -framework AppKit -framework Metal -framework QuartzCore \
+	    -framework ImageIO -framework CoreGraphics -o $@
+interp: $(BUILD)/dr-interp
+$(BUILD)/dr/aot.o: aot.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(DR_INC) -I$(M32)/runtime -c aot.c -o $@
+$(BUILD)/dr/game.o: game.c $(M32_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c game.c -o $@
+$(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o
+	$(CC) -arch arm64 $(DR_OBJ) $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/libgame32.a -lobjc -framework Foundation \
+	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -o $@
+dr: $(BUILD)/dr-bmaa
+.PHONY: dr interp

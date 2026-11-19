@@ -6,3 +6,10 @@ build-mc/
 .venv/
 *.log
 shot_*.png
+have.txt
+missing.txt
+trace-*.txt
+run-*.log
+win.txt
+.DS_Store
+run*.out
