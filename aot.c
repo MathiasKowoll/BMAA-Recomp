@@ -20,7 +20,11 @@
 //   - A run is left early (an import nobody answers, exit, a fault in guest memory, a C++ throw) with a jump back
 //     to dr_cpu_run, which hands DecompRecomp the same status its interpreter would.
 //
-// One guest thread, as in DecompRecomp today.
+// Threads. DecompRecomp has one guest thread and refuses pthread_create; this game ends its start-up by creating
+// its game thread. Here every guest thread is a host thread with a CPU of its own (and a dr_cpu of its own for the
+// bridge to read arguments from), and threads.c answers what creates threads and what blocks. The bridge was not
+// written for two threads at once, so one lock wraps every call into it; it is let go while guest code runs
+// (a callback from the bridge) and while the bridge sits in a host call that may block (dr_host_call_enter).
 #include <setjmp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -29,7 +33,10 @@
 #include <string.h>
 #include <fenv.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/mman.h>
 
+#include "dr_bridge.h"
 #include "dr_x86.h"
 
 #include "rt.h"
@@ -78,11 +85,34 @@ void rt_on_watch(CPU *c, uint32_t a) {
             c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi, c->esp);
 }
 
-static dr_cpu *D;            // DecompRecomp's CPU
-static CPU G;                // the same guest thread, as the translated code sees it
-static sigjmp_buf *leave;    // the innermost dr_cpu_run
-static dr_status leave_with;
+static dr_cpu *main_cpu;                 // DecompRecomp's CPU: the main thread's
+static CPU main_G;
+static _Thread_local dr_cpu *Dt;         // this thread's, for the bridge
+static _Thread_local CPU *Gt;            // this thread's, as the translated code sees it
+static _Thread_local sigjmp_buf *leave;  // the innermost run of this thread
+static _Thread_local dr_status leave_with;
+#define D Dt
+#define G (*Gt)
 static uint64_t nimports, ncalls_ind;
+CPU *cpu_new(uint32_t stack_size);
+void aot_thread_begin(CPU *c);
+
+// ---- the lock around the bridge ----
+static pthread_mutex_t big;
+static pthread_once_t big_once = PTHREAD_ONCE_INIT;
+static void big_make(void) {
+    pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&big, &a);
+}
+static _Thread_local int big_depth;
+static void big_lock(void) { pthread_once(&big_once, big_make); pthread_mutex_lock(&big); big_depth++; }
+static void big_unlock(void) { big_depth--; pthread_mutex_unlock(&big); }
+static int big_release_all(void) { int d = big_depth; while (big_depth) big_unlock(); return d; }
+static void big_reacquire(int d) { while (big_depth < d) big_lock(); }
+// The bridge is about to make a host call that may block, or has come back from it.
+static _Thread_local int held_before[32], nheld_before;
+static void host_call_enter(void) { if (nheld_before < 32) held_before[nheld_before++] = big_release_all(); }
+static void host_call_leave(void) { if (nheld_before > 0) big_reacquire(held_before[--nheld_before]); }
 
 static void in(void) {
     G.eax = D->regs[DR_EAX]; G.ecx = D->regs[DR_ECX]; G.edx = D->regs[DR_EDX]; G.ebx = D->regs[DR_EBX];
@@ -131,8 +161,10 @@ static void import(CPU *c, uint32_t thunk) {
     out();
     D->eip = thunk;
     D->tail_jump = false;
-    if (!D->on_import || !D->on_import(D, thunk, D->user))
-        stop(D->exited ? DR_HALT_EXIT : D->threw ? DR_ERR_THROW : DR_ERR_IMPORT);
+    big_lock();
+    bool ok = D->on_import && D->on_import(D, thunk, D->user);
+    big_unlock();
+    if (!ok) stop(D->exited ? DR_HALT_EXIT : D->threw ? DR_ERR_THROW : DR_ERR_IMPORT);
     in();
     if (D->tail_jump) {   // the bridge found guest code to run in its place: same stack, same return address
         D->tail_jump = false;
@@ -142,8 +174,15 @@ static void import(CPU *c, uint32_t thunk) {
 }
 
 // Control goes to guest address t with the return address on the stack; when this returns, the address is popped.
+static int stub_of_thunk(uint32_t t);
 static void enter(CPU *c, uint32_t t) {
-    if (t >= DR_THUNK_BASE) { import(c, t); c->esp += 4; return; }
+    if (t >= DR_THUNK_BASE) {
+        // By its stub's function when it has one: that is this file's unimpl_import for most, and for the few
+        // that threads.c answers itself (what creates threads and what blocks) it is that answer.
+        int k = stub_of_thunk(t);
+        if (k >= 0) gstubs[k].fn(c); else import(c, t);
+        c->esp += 4; return;
+    }
     const GFunc *f = func_at(t);
     if (f) { f->fn(c); return; }
     for (int k = 0; k < ngstubs; k++)   // the address of a stub, taken as a function pointer
@@ -153,28 +192,58 @@ static void enter(CPU *c, uint32_t t) {
     if (t >= DR_UNRESOLVED_BASE) fprintf(stderr, "  [aot]   that is the marker of a data symbol nobody resolved\n");
     stop(DR_ERR_OPCODE);
 }
-void call_ind(CPU *c, uint32_t t) { ncalls_ind++; enter(c, t); }
+// DR_CALLSITE=addr: an indirect call that returns to that address is printed, with where it went, what it was
+// given and what it answered.
+static uint32_t callsite = 1, callsite_hi;   // or DR_CALLSITE=lo-hi: every indirect call that returns into that range
+void call_ind(CPU *c, uint32_t t) {
+    ncalls_ind++;
+    if (callsite == 1) {
+        const char *e = getenv("DR_CALLSITE"); char *dash = NULL;
+        callsite = e ? (uint32_t)strtoul(e, &dash, 16) : 0;
+        callsite_hi = (dash && *dash == '-') ? (uint32_t)strtoul(dash + 1, NULL, 16) : callsite;
+    }
+    uint32_t ra = callsite ? rd32(c->esp) : 0;
+    if (callsite && ra >= callsite && ra <= callsite_hi) {
+        fprintf(stderr, "  [site] %08x calls %08x (%s)  a=%08x,%08x,%08x  ecx=%08x\n", ra, t, rt_func_name(t),
+                rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), c->ecx);
+        enter(c, t);
+        fprintf(stderr, "  [site] %08x: it answered eax=%08x edx=%08x\n", ra, c->eax, c->edx);
+        return;
+    }
+    enter(c, t);
+}
 
 // ---- names of imports -> thunks ----
 // A stub is `jmp *[pointer]` (ff 25, then the pointer's address), and DecompRecomp's loader wrote the thunk there.
 static struct { const char *name; uint32_t thunk; } *by_name;
 static uint32_t nby_name;
 static uint32_t hash(const char *s) { uint32_t h = 2166136261u; while (*s) h = (h ^ (uint8_t)*s++) * 16777619u; return h; }
-static uint32_t thunk_of(const char *name) {
-    if (!by_name) {
-        nby_name = 1; while (nby_name < (uint32_t)ngstubs * 2 + 16) nby_name <<= 1;
-        by_name = calloc(nby_name, sizeof *by_name);
-        for (int k = 0; k < ngstubs; k++) {
-            uint32_t a = gstubs[k].addr, t = 0;
-            if (rd8(a) == 0xFF && rd8(a + 1) == 0x25) t = rd32(rd32(a + 2));
-            uint32_t i = hash(gstubs[k].name) & (nby_name - 1);
-            while (by_name[i].name) i = (i + 1) & (nby_name - 1);
-            by_name[i].name = gstubs[k].name; by_name[i].thunk = t;
-        }
+static int32_t *stub_by_thunk;   // (thunk - base) / stride -> stub index + 1
+static pthread_once_t names_once = PTHREAD_ONCE_INIT;
+static void names_make(void) {
+    nby_name = 1; while (nby_name < (uint32_t)ngstubs * 2 + 16) nby_name <<= 1;
+    by_name = calloc(nby_name, sizeof *by_name);
+    stub_by_thunk = calloc(DR_THUNK_MAX, sizeof *stub_by_thunk);
+    for (int k = 0; k < ngstubs; k++) {
+        uint32_t a = gstubs[k].addr, t = 0;
+        if (rd8(a) == 0xFF && rd8(a + 1) == 0x25) t = rd32(rd32(a + 2));
+        uint32_t i = hash(gstubs[k].name) & (nby_name - 1);
+        while (by_name[i].name) i = (i + 1) & (nby_name - 1);
+        by_name[i].name = gstubs[k].name; by_name[i].thunk = t;
+        if (t >= DR_THUNK_BASE && (t - DR_THUNK_BASE) / DR_THUNK_STRIDE < DR_THUNK_MAX)
+            stub_by_thunk[(t - DR_THUNK_BASE) / DR_THUNK_STRIDE] = k + 1;
     }
+}
+static uint32_t thunk_of(const char *name) {
+    pthread_once(&names_once, names_make);
     for (uint32_t i = hash(name) & (nby_name - 1); by_name[i].name; i = (i + 1) & (nby_name - 1))
         if (!strcmp(by_name[i].name, name)) return by_name[i].thunk;
     return 0;
+}
+static int stub_of_thunk(uint32_t t) {
+    pthread_once(&names_once, names_make);
+    uint32_t i = (t - DR_THUNK_BASE) / DR_THUNK_STRIDE;
+    return i < DR_THUNK_MAX ? stub_by_thunk[i] - 1 : -1;
 }
 
 // setjmp is compiled into the function that calls it (the host's setjmp, in that frame); longjmp is its other half
@@ -243,9 +312,14 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     cpu->mxcsr = 0x1F80;
     cpu->flags = 0x202;
     M = g->base;
+    main_cpu = cpu;
+    Dt = cpu;
+    Gt = &main_G;
     memset(&G, 0, sizeof G);
     G.fcw = 0x37F; G.mxcsr = 0x1F80;
-    D = cpu;
+    G.stack_hi = DR_STACK_TOP; G.stack_lo = DR_STACK_TOP - DR_STACK_SIZE;
+    dr_host_call_enter = host_call_enter;
+    dr_host_call_leave = host_call_leave;
     trace_window_hook = window;
     watch_some();
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
@@ -268,10 +342,10 @@ void dr_cpu_setup_call(dr_cpu *cpu, uint32_t func, const uint32_t *args, int arg
 static void on_fault(int sig, siginfo_t *info, void *uctx) {
     (void)sig; (void)uctx;
     uint8_t *a = (uint8_t *)info->si_addr;
-    if (!D || !leave || a < M || a >= M + DR_GUEST_SIZE) {
+    if (!D || !Gt || !leave || a < M || a >= M + DR_GUEST_SIZE) {
         char b[256];
         int n = snprintf(b, sizeof b, "  [aot] host fault at %p (guest memory is %p..%p), in or under guest %s\n",
-                         (void *)a, (void *)M, (void *)(M + DR_GUEST_SIZE), rt_func_name(G.fn));
+                         (void *)a, (void *)M, (void *)(M + DR_GUEST_SIZE), Gt ? rt_func_name(G.fn) : "no guest thread");
         write(2, b, (size_t)n);
         _exit(139);
     }
@@ -280,7 +354,7 @@ static void on_fault(int sig, siginfo_t *info, void *uctx) {
     stop(DR_ERR_FAULT);
 }
 void dr_cpu_install_fault_handler(dr_cpu *cpu) {
-    D = cpu;
+    (void)cpu;
     static char alt[SIGSTKSZ * 4];
     stack_t ss = {0}; ss.ss_sp = alt; ss.ss_size = sizeof alt;
     sigaltstack(&ss, NULL);
@@ -292,22 +366,41 @@ void dr_cpu_install_fault_handler(dr_cpu *cpu) {
     sigaction(SIGBUS, &sa, NULL);
 }
 
-dr_status dr_cpu_run(dr_cpu *cpu) {
-    D = cpu;
+// Guest code runs from here until the function at D->eip returns. The lock around the bridge is let go for that
+// long, whoever holds it, and taken back as it was.
+static dr_status run(void) {
     sigjmp_buf here, *outer = leave;
-    if (sigsetjmp(here, 1)) { leave = outer; return leave_with; }
+    volatile int held = big_release_all();
+    if (sigsetjmp(here, 1)) { leave = outer; big_release_all(); big_reacquire(held); return leave_with; }
     leave = &here;
     in();
-    G.fn = cpu->eip;
-    enter(&G, cpu->eip);     // returns when that function does, its return address (the sentinel) popped
+    G.fn = D->eip;
+    enter(&G, D->eip);       // returns when that function does, its return address (the sentinel) popped
     out();
     leave = outer;
-    cpu->eip = cpu->magic_ret;
+    big_reacquire(held);
     return DR_HALT_RET;
 }
 
-dr_status dr_cpu_call_nested(dr_cpu *cpu, uint32_t func, const uint32_t *args, int argc, uint32_t stack_top,
+dr_status dr_cpu_run(dr_cpu *cpu) {
+    if (!Dt) aot_thread_begin(NULL);
+    if (cpu != Dt) {   // the driver's CPU, on a thread that is not the main one: its call, on this thread's stack
+        Dt->eip = cpu->eip;
+    }
+    dr_status st = run();
+    if (st == DR_HALT_RET) Dt->eip = Dt->magic_ret;
+    return st;
+}
+
+// The bridge calls back into the guest: a method of one of the game's classes, a callback it registered. It names
+// the CPU it was given at start-up, which is the main thread's; the call runs on the thread it arrives on, with
+// that thread's CPU. On the main thread the stack is the one the bridge chose; on any other, the thread's own
+// stack below where it stands, which is free while the thread is inside the bridge or the host.
+dr_status dr_cpu_call_nested(dr_cpu *given, uint32_t func, const uint32_t *args, int argc, uint32_t stack_top,
                              uint32_t *out_eax) {
+    if (!Dt) aot_thread_begin(NULL);
+    dr_cpu *cpu = Dt;
+    if (cpu != given) stack_top = (cpu->regs[DR_ESP] ? cpu->regs[DR_ESP] : G.esp) - 1024;
     if (cpu->nest_depth >= DR_MAX_NEST) return DR_ERR_LIMIT;
     uint32_t saved_regs[8]; memcpy(saved_regs, cpu->regs, sizeof saved_regs);
     uint32_t saved_eip = cpu->eip, saved_flags = cpu->flags, saved_fn = G.fn;
@@ -316,15 +409,17 @@ dr_status dr_cpu_call_nested(dr_cpu *cpu, uint32_t func, const uint32_t *args, i
 
     cpu->nest_depth++;
     cpu->magic_ret = 0xDEAD0000u + (uint32_t)cpu->nest_depth;
-    cpu->regs[DR_ESP] = stack_top;
+    cpu->regs[DR_ESP] = stack_top & ~15u;
     for (int i = argc - 1; i >= 0; i--) dr_push(cpu, args[i]);
     dr_push(cpu, cpu->magic_ret);
     cpu->eip = func;
     cpu->exited = false;
 
-    dr_status st = dr_cpu_run(cpu);
+    dr_status st = run();
     if (out_eax) *out_eax = cpu->regs[DR_EAX];
     cpu->fail_eip = (st == DR_OK || st == DR_HALT_RET) ? 0 : cpu->eip;
+    given->fail_eip = cpu->fail_eip;
+    if (cpu != given && st == DR_ERR_FAULT) given->fault_addr = cpu->fault_addr;
 
     cpu->magic_ret = saved_magic;
     cpu->nest_depth--;
@@ -332,8 +427,67 @@ dr_status dr_cpu_call_nested(dr_cpu *cpu, uint32_t func, const uint32_t *args, i
     cpu->eip = saved_eip; cpu->flags = saved_flags; cpu->exited = saved_exited;
     cpu->tail_jump = saved_tail; cpu->tail_target = saved_tail_target;
     G.fn = saved_fn;
+    in();   // the thread goes on from where it was
     return st;
 }
+
+// ---- for threads.c ----
+// A guest stack and a CPU that starts at its top.
+CPU *cpu_new(uint32_t stack_size) {
+    CPU *c = calloc(1, sizeof *c);
+    stack_size = (stack_size + 0xFFFFu) & ~0xFFFFu;
+    big_lock();
+    uint32_t lo = dr_guest_alloc(main_cpu->g, stack_size, PROT_READ | PROT_WRITE);
+    big_unlock();
+    if (!lo) { fprintf(stderr, "  [aot] no room for a guest stack of %u bytes\n", stack_size); abort(); }
+    c->stack_lo = lo; c->stack_hi = lo + stack_size;
+    c->esp = c->stack_hi - 64;
+    c->fcw = 0x37F; c->mxcsr = 0x1F80;
+    return c;
+}
+// This host thread becomes a guest thread with CPU c (or a new one): it gets a dr_cpu of its own, which is the
+// main one's settings and no state.
+void aot_thread_begin(CPU *c) {
+    if (!c) c = cpu_new(1u << 20);
+    dr_cpu *d = malloc(sizeof *d);
+    *d = *main_cpu;
+    memset(d->regs, 0, sizeof d->regs);
+    d->regs[DR_ESP] = c->esp;
+    d->nest_depth = 0; d->tail_jump = false; d->exited = false; d->threw = false; d->faulted = false;
+    d->magic_ret = MAGIC_RET;
+    Gt = c; Dt = d;
+}
+// Call a guest function on this thread, which stands in the host (a new thread's start routine, a block handed
+// to a queue). cdecl; returns eax.
+uint32_t guest_call(CPU *c, uint32_t addr, int nargs, const uint32_t *args) {
+    if (Gt != c) aot_thread_begin(c);
+    uint32_t sp = c->esp;
+    for (int i = nargs - 1; i >= 0; i--) PUSH(args[i]);
+    PUSH(0xDEAD0000u);
+    out();
+    D->eip = addr;
+    dr_status st = run();
+    if (st != DR_HALT_RET)
+        fprintf(stderr, "  [aot] a guest call to 0x%08x (%s) on a thread of its own ended: %s\n", addr, rt_func_name(addr), dr_status_str(st));
+    uint32_t r = c->eax;
+    c->esp = sp;
+    return r;
+}
+// The same on a thread that is in the middle of something (the main thread in its run loop, called by a queue):
+// below where it stands, and nothing it had is disturbed.
+uint32_t guest_call_here(uint32_t addr, int nargs, const uint32_t *args) {
+    if (!Dt) aot_thread_begin(NULL);
+    uint32_t eax = 0;
+    dr_cpu fake; fake.fail_eip = 0; fake.fault_addr = 0;   // "not this thread's": takes the stack below
+    dr_cpu_call_nested(&fake, addr, args, nargs, 0, &eax);
+    return eax;
+}
+int aot_is_main_thread(void) { return Gt == &main_G; }
+uint32_t aot_stack_lo(void) { return Gt ? G.stack_lo : 0; }
+uint32_t aot_stack_hi(void) { return Gt ? G.stack_hi : 0; }
+// For threads.c: memory of the guest's, taken under the bridge's lock.
+uint32_t aot_malloc(uint32_t n) { big_lock(); uint32_t p = dr_guest_malloc(main_cpu->g, n); big_unlock(); return p; }
+void aot_free(uint32_t p) { big_lock(); dr_guest_free(main_cpu->g, p); big_unlock(); }
 
 // The interpreter skips a function by address as it is entered. Translated callers call it by name, so a function
 // to neutralise is listed in hle.txt instead and answered by an H_ function of the project (see game.c).

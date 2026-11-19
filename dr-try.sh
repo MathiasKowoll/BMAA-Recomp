@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 D="$(cd "$(dirname "$(readlink orig.bin)")/../../.." && pwd)"
 J="$(mktemp -d "${TMPDIR:-/tmp}/bmaa-jaula.XXXXXX")"
-FERAL_RUNTIME_DATA_FOLDER="$D" ./build/dr-bmaa --entry --window "${WINDOW:-20}" --init --gl --limit 8000000000 \
+FERAL_RUNTIME_DATA_FOLDER="$D" ./build/dr-bmaa --entry --window "${WINDOW:-100000}" --init --gl --limit 8000000000 \
     --escritura "$J" "$(readlink orig.bin)" > dr-run.log 2>&1 &
 pid=$!; n=0
 while kill -0 $pid 2>/dev/null && [ $n -lt "${1:-100}" ]; do /usr/bin/python3 -c "import time; time.sleep(1)"; n=$((n+1)); done
