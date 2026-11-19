@@ -2,6 +2,8 @@
 // For looking at what the game put on screen without being in front of it.
 #import <AppKit/AppKit.h>
 #include <signal.h>
+#include <dlfcn.h>
+#include <objc/runtime.h>
 #include <stdio.h>
 
 @interface NSView (DRDebug)
@@ -13,6 +15,31 @@ void dbg_init(void) {
     static dispatch_source_t src;
     src = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR2, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(src, ^{
+        // DBG_CLICK=x,y: a left click at that point of the launcher window's content (points, from its top left),
+        // delivered to the application as the system would, inside this process (nothing is posted to the desktop)
+        if (getenv("DBG_CLICK")) {
+            double x = 0, y = 0; sscanf(getenv("DBG_CLICK"), "%lf,%lf", &x, &y);
+            for (NSWindow *w in [NSApp windows]) {
+                if (![w.title containsString:@"Options"]) continue;
+                {   // who answers the events of this window
+                    for (Class k = object_getClass(w); k; k = class_getSuperclass(k)) {
+                        Method m = class_getInstanceMethod(k, @selector(sendEvent:));
+                        Dl_info di; IMP imp = m ? method_getImplementation(m) : NULL;
+                        if (imp && dladdr((void *)imp, &di))
+                            fprintf(stderr, "  [click] %s -sendEvent: is %s\n", class_getName(k), di.dli_sname ?: "?");
+                        if (!strcmp(class_getName(k), "NSWindow")) break;
+                    }
+                }
+                NSPoint pt = NSMakePoint(x, w.contentView.bounds.size.height - y);
+                for (int k = 0; k < 2; k++) {
+                    NSEvent *e = [NSEvent mouseEventWithType:k ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDown location:pt
+                                               modifierFlags:0 timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                                windowNumber:w.windowNumber context:nil eventNumber:k clickCount:1 pressure:k ? 0 : 1];
+                    fprintf(stderr, "  [click] %s at %.0f,%.0f in \"%s\"\n", k ? "up" : "down", pt.x, pt.y, w.title.UTF8String);
+                    [NSApp sendEvent:e];
+                }
+            }
+        }
         for (NSWindow *w in [NSApp windows]) {
             fprintf(stderr, "  [views] window \"%s\" %s frame %s visible %d key %d alpha %.2f opaque %d\n", w.title.UTF8String,
                     object_getClassName(w), NSStringFromRect(w.frame).UTF8String, w.isVisible, w.isKeyWindow, w.alphaValue, w.isOpaque);

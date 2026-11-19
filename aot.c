@@ -27,6 +27,7 @@
 // (a callback from the bridge) and while the bridge sits in a host call that may block (dr_host_call_enter).
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <execinfo.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -75,6 +76,7 @@ static const char *said(uint32_t a) {
 }
 
 static void show_last(void);
+static void show_more(int count);
 static void on_usr1(int sig);
 static void on_term(int sig) {
     (void)sig;
@@ -95,13 +97,34 @@ static void watch_some(void) {
 }
 static void show(uint32_t p) {
     if (p < 0x1000 || p >= 0xE0000000u) return;
-    if (p < 0x60000000u && !(p < 0x04000000u || (p >= 0x1f000000u && p < 0x20000000u) || (p >= 0x50000000u && p < 0x51000000u))) return;
+    if (p < 0x60000000u && !(p < 0x04000000u || (p >= 0x1f000000u && p < 0x20000000u) || (p >= 0x40000000u && p < 0x51000000u))) return;
     if (p >= 0xA0000000u) return;   // past the guest heap: a float's bits, not a pointer
     fprintf(stderr, "        %08x:", p);
     for (int k = 0; k < 32; k++) fprintf(stderr, " %02x", rd8(p + k));
     fprintf(stderr, "  |");
     for (int k = 0; k < 32; k++) { uint8_t ch = rd8(p + k); fputc(ch >= 32 && ch < 127 ? ch : '.', stderr); }
     fprintf(stderr, "|\n");
+    // an engine string object {data, count, capacity}: the text its data points at
+    {
+        uint32_t d = rd32(p), n = rd32(p + 4), cap = rd32(p + 8);
+        if (d >= 0x1000 && d < 0xA0000000u && n > 0 && n <= cap && cap < 4096 && rd16(d) >= 32 && rd16(d) < 127) {
+            fprintf(stderr, "        -> utf16[%u]: \"", n);
+            for (uint32_t k = 0; k < n && k < 300; k++) { uint32_t ch = rd16(d + 2u * k); if (!ch) break; fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr); }
+            fprintf(stderr, "\"\n");
+        }
+    }
+    // text in 16-bit characters (an engine's TCHAR): the whole string
+    if (rd16(p) >= 32 && rd16(p) < 127 && rd16(p + 2) >= 32 && rd16(p + 2) < 127 && rd16(p + 4) >= 32 && rd16(p + 4) < 127) {
+        fprintf(stderr, "        utf16: \"");
+        for (int k = 0; k < 500; k++) { uint32_t ch = rd16(p + 2u * k); if (!ch) break; fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr); }
+        fprintf(stderr, "\"\n");
+    }
+    // text in 32-bit characters: the whole string
+    if (rd32(p) >= 32 && rd32(p) < 127 && rd32(p + 4) >= 32 && rd32(p + 4) < 127) {
+        fprintf(stderr, "        wide: \"");
+        for (int k = 0; k < 300; k++) { uint32_t ch = rd32(p + 4u * k); if (!ch) break; fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr); }
+        fprintf(stderr, "\"\n");
+    }
 }
 void rt_on_watch(CPU *c, uint32_t a) {
     if (watching_some && rt_watch[0] != 0xFF) {
@@ -122,7 +145,23 @@ void rt_on_watch(CPU *c, uint32_t a) {
         fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
                 rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx);
         for (int k = 1; k <= 4; k++) show(rd32(c->esp + 4 * k));
+        // DR_WATCH_SET=n: the first argument is an engine set/map whose elements are n bytes and start with a string
+        // object; its keys, once (to see what a lookup is looked up against)
+        if (getenv("DR_WATCH_SET")) {
+            static int done; uint32_t m = rd32(c->esp + 4), sz = (uint32_t)atoi(getenv("DR_WATCH_SET"));
+            if (!done++ && sz) {
+                uint32_t data = rd32(m), num = rd32(m + 4);
+                fprintf(stderr, "  [set] %08x: %u elements at %08x, hash %08x size %u\n", m, num, data, rd32(m + 0x1c), rd32(m + 0x20));
+                for (uint32_t i = 0; i < num && i < 400; i++) {
+                    uint32_t e = data + i * sz, d = rd32(e), n = rd32(e + 4);
+                    fprintf(stderr, "    %3u: ", i);
+                    for (uint32_t k = 0; d && k < n && k < 80; k++) { uint32_t ch = rd16(d + 2u * k); if (!ch) break; fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr); }
+                    fprintf(stderr, "  [next %d hashidx %d]\n", (int)rd32(e + sz - 8), (int)rd32(e + sz - 4));
+                }
+            }
+        }
         if (getenv("DR_WATCH_LAST")) show_last();   // and what this thread was last told by the bridge
+        if (getenv("DR_WATCH_MORE")) show_more(atoi(getenv("DR_WATCH_MORE")));   // or the longer memory of it
         return;
     }
     fprintf(stderr, "  [fn] %08x %s  ret=%08x a=%08x,%08x,%08x  eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x esp=%08x\n",
@@ -206,11 +245,21 @@ static void import(CPU *c, uint32_t thunk) {
     out();
     D->eip = thunk;
     D->tail_jump = false;
+    uint32_t sp_before = c->esp, ret_before = rd32(c->esp);
     big_lock();
     bool ok = D->on_import && D->on_import(D, thunk, D->user);
     big_unlock();
     if (!ok) stop(D->exited ? DR_HALT_EXIT : D->threw ? DR_ERR_THROW : DR_ERR_IMPORT);
     in();
+    // An import leaves esp where it found it (the caller pops the return address), or one slot up when the callee
+    // pops a hidden struct pointer. Anything else, or a return address that changed under it, is the bridge (or a
+    // callback it made) writing over the caller's frame: said here, where it happens, instead of at a return later.
+    if (!D->tail_jump && ((c->esp != sp_before && c->esp != sp_before + 4) || rd32(sp_before) != ret_before)) {
+        static int said;
+        if (said++ < 20)
+            fprintf(stderr, "  [aot] import at thunk %08x (from %s): esp %08x -> %08x, return address %08x -> %08x\n", thunk,
+                    rt_func_name(ret_before), sp_before, c->esp, ret_before, rd32(sp_before));
+    }
     if (D->tail_jump) {   // the bridge found guest code to run in its place: same stack, same return address
         D->tail_jump = false;
         enter(c, D->tail_target);
@@ -343,6 +392,43 @@ static void show_last(void) {
     }
 }
 
+// A longer memory of the calls that say something (not the allocator, the string compares or the memory copies):
+// DR_LAST_MORE=n prints the last n of them when the game throws, with the text a first argument points at.
+#define NMORE 4096
+static _Thread_local struct { const char *name; uint32_t a[3], from, eax; } more[NMORE];
+static _Thread_local unsigned nmore;
+static int dull(const char *n) {
+    static const char *const names[] = { "_wcscmp", "_malloc", "_free", "__Znwm", "__ZdlPv", "__Znam", "__ZdaPv", "___bzero", "_memcpy",
+        "_memmove", "_memset", "_strlen", "_memcmp", "_realloc", "_calloc", "_strcmp", "_wcslen", "_pthread_mutex_lock",
+        "_pthread_mutex_unlock", "_pthread_getspecific", "_pthread_self", "_OSAtomicAdd32", "_mach_absolute_time", NULL };
+    for (int k = 0; names[k]; k++) if (!strcmp(n, names[k])) return 1;
+    return !strncmp(n, "__ZSt", 5) || !strncmp(n, "__ZNS", 5) || !strncmp(n, "_OSAtomic", 9) || !strncmp(n, "_OSSpin", 7) ||
+           !strncmp(n, "_CFString", 9) || !strncmp(n, "_CFRelease", 10) || !strncmp(n, "_CFRetain", 9) ||
+           !strncmp(n, "_CFAllocator", 12) || !strncmp(n, "_vsnprintf", 10) || !strncmp(n, "_strto", 6) ||
+           !strncmp(n, "_objc_msgSend", 13) || !strncmp(n, "_pthread_", 9) || !strcmp(n, "___tolower") ||
+           !strcmp(n, "_posix_memalign") || !strcmp(n, "_malloc_size") || !strcmp(n, "_FSFindFolder");
+}
+static void show_more(int count) {
+    for (unsigned k = nmore > (unsigned)count ? nmore - (unsigned)count : 0; k < nmore; k++) {
+        if (nmore - k > NMORE) continue;
+        uint32_t p = more[k % NMORE].a[0];
+        char text[140] = "";
+        if ((p >= 0x1000 && p < 0x04000000u) || (p >= 0x1f800000u && p < 0x20000000u) || (p >= 0x40000000u && p < 0x9FFFFF00u)) {
+            if (rd8(p) >= 32 && rd8(p) < 127 && rd8(p + 1) >= 32 && rd8(p + 1) < 127 && rd8(p + 2) >= 32 && rd8(p + 2) < 127) {
+                int j = 0; text[j++] = ' '; text[j++] = '"';
+                for (int i = 0; i < 120 && rd8(p + i) >= 32 && rd8(p + i) < 127; i++) text[j++] = (char)rd8(p + i);
+                text[j++] = '"'; text[j] = 0;
+            } else if (rd16(p) >= 32 && rd16(p) < 127 && rd16(p + 2) >= 32 && rd16(p + 2) < 127) {
+                int j = 0; text[j++] = ' '; text[j++] = 'L'; text[j++] = '"';
+                for (int i = 0; i < 120 && rd16(p + 2 * i) >= 32 && rd16(p + 2 * i) < 127; i++) text[j++] = (char)rd16(p + 2 * i);
+                text[j++] = '"'; text[j] = 0;
+            }
+        }
+        fprintf(stderr, "      %-40.60s a=%08x,%08x,%08x -> %08x  from %s%s\n", more[k % NMORE].name, more[k % NMORE].a[0],
+                more[k % NMORE].a[1], more[k % NMORE].a[2], more[k % NMORE].eax, rt_func_name(more[k % NMORE].from), text);
+    }
+}
+
 static void on_usr1(int sig) {
     (void)sig;
     char b[160]; int n = snprintf(b, sizeof b, "  [aot] SIGUSR1: this thread is in %s; its last calls into the bridge:\n", Gt ? rt_func_name(G.fn) : "no guest code");
@@ -358,6 +444,30 @@ void unimpl_import(CPU *c, const char *name) {
     }
     uint32_t thunk = thunk_of(name);
     if (window_open) fprintf(stderr, "  [imp] %s  a=%08x,%08x,%08x,%08x  from %s\n", name, ARG(0), ARG(1), ARG(2), ARG(3), rt_func_name(rd32(c->esp)));
+    if (!strcmp(name, "___cxa_throw")) {   // what it was told before it threw
+        fprintf(stderr, "  [aot] the game throws a C++ exception; this thread's last calls into the bridge:\n");
+        show_last();
+        if (getenv("DR_LAST_MORE")) {
+            fprintf(stderr, "  [aot] and the last ones that are not the allocator or string routines:\n");
+            show_more(atoi(getenv("DR_LAST_MORE")));
+        }
+        // DR_THROW_TEXT=addr,addr: the text at those addresses when it throws (an engine's error message buffer),
+        // read as 32-bit, 16-bit and 8-bit characters
+        for (const char *w = getenv("DR_THROW_TEXT"); w && *w;) {
+            char *e; uint32_t a = (uint32_t)strtoul(w, &e, 16);
+            if (e == w) break;
+            for (int ancho = 4; ancho >= 1; ancho >>= 1) {
+                fprintf(stderr, "  [aot] text at %08x (%d-byte chars): \"", a, ancho);
+                for (int k = 0; k < 400; k++) {
+                    uint32_t ch = ancho == 4 ? rd32(a + 4u * k) : ancho == 2 ? rd16(a + 2u * k) : rd8(a + k);
+                    if (!ch) break;
+                    fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr);
+                }
+                fprintf(stderr, "\"\n");
+            }
+            w = *e ? e + 1 : e;
+        }
+    }
     if (!strcmp(name, "_exit") || !strcmp(name, "__Exit")) {   // what it was told before it chose to leave
         fprintf(stderr, "  [aot] the game calls %s(%d); this thread's last calls into the bridge:\n", name, (int)ARG(0));
         show_last();
@@ -388,6 +498,11 @@ void unimpl_import(CPU *c, const char *name) {
     }
     import(c, thunk);
     last[slot].eax = c->eax;
+    if (!dull(name)) {
+        unsigned m = nmore++ % NMORE;
+        more[m].name = name; more[m].a[0] = last[slot].a[0]; more[m].a[1] = last[slot].a[1]; more[m].a[2] = last[slot].a[2];
+        more[m].from = last[slot].from; more[m].eax = c->eax;
+    }
 }
 
 // ---- what translated code calls for itself ----
@@ -443,6 +558,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     watch_some();
     if (game_init) game_init();
     { extern void dbg_init(void); dbg_init(); }   // kill -USR2: the windows and their views
+    if (getenv("DR_VFS_VERBOSE")) { extern void dr_vfs_set_verbose(bool); dr_vfs_set_verbose(true); }   // every file call, by path
     signal(SIGTERM, on_term);   // a run stopped from outside still says which imports nobody answered
     signal(SIGUSR1, on_usr1);   // kill -USR1: what the thread that takes the signal was last told by the bridge
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
@@ -474,6 +590,11 @@ static void on_fault(int sig, siginfo_t *info, void *uctx) {
     }
     D->fault_addr = (uint32_t)(a - M);
     D->faulted = true;
+    if (getenv("DR_FAULT_BT")) {   // the host's frames too: a guest address can be touched by the bridge, not the game
+        void *fr[40]; int nf = backtrace(fr, 40);
+        write(2, "  [aot] host frames at the fault:\n", 34);
+        backtrace_symbols_fd(fr, nf, 2);
+    }
     {   // where: the function, and who called it, by the chain of frames
         char b[700]; int n = snprintf(b, sizeof b, "  [aot] guest fault at 0x%08x, last function entered %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
                                       D->fault_addr, rt_func_name(G.fn), G.eax, G.ecx, G.edx, G.ebx, G.esi, G.edi);
@@ -543,6 +664,13 @@ dr_status dr_cpu_call_nested2(dr_cpu *given, uint32_t func, const uint32_t *args
     if (!Dt) aot_thread_begin(NULL);
     dr_cpu *cpu = Dt;
     if (cpu != given) stack_top = (cpu->regs[DR_ESP] ? cpu->regs[DR_ESP] : G.esp) - 1024;
+    // Never above where this thread's guest code stands: the caller picks a callback stack by nesting depth, and a
+    // callback that the host makes while another callback is running (the window becoming key inside the game's
+    // own makeKeyAndOrderFront:, itself inside runApp:) got the same stack as the one in progress and ran over it.
+    {
+        uint32_t here = cpu->regs[DR_ESP] ? cpu->regs[DR_ESP] : G.esp;
+        if (here && here - 1024 < stack_top && here > 0x1000 + 0x10000) stack_top = here - 1024;
+    }
     if (cpu->nest_depth >= DR_MAX_NEST) return DR_ERR_LIMIT;
     uint32_t saved_regs[8]; memcpy(saved_regs, cpu->regs, sizeof saved_regs);
     uint32_t saved_eip = cpu->eip, saved_flags = cpu->flags, saved_fn = G.fn;
