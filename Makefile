@@ -74,10 +74,12 @@ $(BUILD)/dr/threads.o: threads.c $(M32_HDR)
 $(BUILD)/dr/steam.o: steam.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c steam.c -o $@
+$(BUILD)/dr/dbg.o: dbg.m
+	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c dbg.m -o $@
 $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
-BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o
+BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
 	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
 	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -o $@

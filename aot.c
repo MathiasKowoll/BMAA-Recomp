@@ -438,6 +438,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     trace_window_hook = window;
     watch_some();
     if (game_init) game_init();
+    { extern void dbg_init(void); dbg_init(); }   // kill -USR2: the windows and their views
     signal(SIGTERM, on_term);   // a run stopped from outside still says which imports nobody answered
     signal(SIGUSR1, on_usr1);   // kill -USR1: what the thread that takes the signal was last told by the bridge
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
