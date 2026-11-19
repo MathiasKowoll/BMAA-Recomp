@@ -40,7 +40,8 @@ uint8_t rt_watch[0x10000000 / 8];
 const char *rt_func_name(uint32_t a);
 // trace.c opens a window between two bridge calls: every function entered in it is printed, with what it was given.
 extern void (*trace_window_hook)(int on);
-static void window(int on) { memset(rt_watch, on ? 0xFF : 0, sizeof rt_watch); }
+static int window_open;
+static void window(int on) { window_open = on; memset(rt_watch, on ? 0xFF : 0, sizeof rt_watch); }
 // DR_WATCH=addr,addr,...: those functions are printed each time they are entered (the first 40 times each), with
 // what their first four arguments point at, when they point into guest memory that is there.
 static int watching_some;
@@ -193,6 +194,7 @@ void unimpl_import(CPU *c, const char *name) {
         longjmp(j->host, 1);
     }
     uint32_t thunk = thunk_of(name);
+    if (window_open) fprintf(stderr, "  [imp] %s  a=%08x,%08x,%08x,%08x  from %s\n", name, ARG(0), ARG(1), ARG(2), ARG(3), rt_func_name(rd32(c->esp)));
     if (thunk < DR_THUNK_BASE) {
         fprintf(stderr, "  [aot] import %s has no thunk (its pointer holds 0x%08x), called from %s\n", name, thunk, rt_func_name(c->fn));
         stop(DR_ERR_IMPORT);
