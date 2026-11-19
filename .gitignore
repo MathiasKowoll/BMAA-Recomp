@@ -1,0 +1,8 @@
+# Nothing of the game is ever committed: not its executable, not the C generated from it, not what is built from that.
+orig.bin
+gen/
+build/
+build-mc/
+.venv/
+*.log
+shot_*.png

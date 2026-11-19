@@ -1,0 +1,1 @@
+# Guest functions replaced by native ones: "address name [outside]" per line.
