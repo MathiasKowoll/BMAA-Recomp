@@ -25,7 +25,7 @@ include $(FW)/mac32/mac32.mk
 # made at build time: the guest heap is 1 GB, not 512 MB (four more size classes of the same formula). With its
 # interpreter the game never got far enough to need more; with translated code it fills 512 MB while it loads.
 DR      = ../DecompRecomp/runtime
-DR_C    = guest macho32 vfs objc cxxshim cxxstring carbon glcontext cbtramp cfbridge testgl bridge dr_run gfx
+DR_C    = guest macho32 vfs objc cxxshim cxxstring carbon glcontext cbtramp cfbridge testgl bridge dr_run gfx libcpura
 DR_M    = appkit glcore objcinvoke
 DR_OBJ  = $(patsubst %,$(BUILD)/dr/%.o,$(DR_C) $(DR_M))
 DR_INC  = $(BUILD)/dr-src/include

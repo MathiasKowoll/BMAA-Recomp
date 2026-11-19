@@ -25,6 +25,8 @@
 // bridge to read arguments from), and threads.c answers what creates threads and what blocks. The bridge was not
 // written for two threads at once, so one lock wraps every call into it; it is let go while guest code runs
 // (a callback from the bridge) and while the bridge sits in a host call that may block (dr_host_call_enter).
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -50,9 +52,37 @@ extern void (*trace_window_hook)(int on);
 static int window_open;
 static void window(int on) { window_open = on; memset(rt_watch, on ? 0xFF : 0, sizeof rt_watch); }
 // DR_WATCH=addr,addr,...: those functions are printed each time they are entered (the first 40 times each), with
-// what their first four arguments point at, when they point into guest memory that is there.
+// what their first four arguments point at, when they point into guest memory that is there. DR_WATCH_FROM=lo-hi
+// keeps only the entries called from that range of code; DR_WATCH_MAX=n raises the 40.
+// What a first argument says when it is a host string or URL the game holds by handle: the text, for DR_LOG_OBJC.
+static const char *said(uint32_t a) {
+    static _Thread_local char buf[200];
+    extern dr_objc *dr_objc_actual(void);
+    dr_objc *o = dr_objc_actual();
+    if (!o || a < DR_OBJC_HANDLE_BASE) return "";
+    void *h = dr_objc_object_for(o, a);
+    if (!h) return "";
+    typedef void *(*send0)(void *, SEL);
+    typedef signed char (*sendk)(void *, SEL, Class);
+    Class str = objc_getClass("NSString"), url = objc_getClass("NSURL");
+    SEL kind = sel_registerName("isKindOfClass:");
+    if (((sendk)objc_msgSend)(h, kind, url)) h = ((send0)objc_msgSend)(h, sel_registerName("absoluteString"));
+    else if (!((sendk)objc_msgSend)(h, kind, str)) return "";
+    const char *t = h ? ((send0)objc_msgSend)(h, sel_registerName("UTF8String")) : NULL;
+    if (!t) return "";
+    snprintf(buf, sizeof buf, "  \"%.180s\"", t);
+    return buf;
+}
+
 static void show_last(void);
 static void on_usr1(int sig);
+static void on_term(int sig) {
+    (void)sig;
+    extern void dr_bridge_report_unimplemented(uint32_t top);
+    dr_bridge_report_unimplemented(80);
+    fflush(stdout);
+    _exit(143);
+}
 static int watching_some;
 static void watch_some(void) {
     const char *w = getenv("DR_WATCH");
@@ -65,6 +95,7 @@ static void watch_some(void) {
 static void show(uint32_t p) {
     if (p < 0x1000 || p >= 0xE0000000u) return;
     if (p < 0x60000000u && !(p < 0x04000000u || (p >= 0x1f000000u && p < 0x20000000u) || (p >= 0x50000000u && p < 0x51000000u))) return;
+    if (p >= 0xA0000000u) return;   // past the guest heap: a float's bits, not a pointer
     fprintf(stderr, "        %08x:", p);
     for (int k = 0; k < 32; k++) fprintf(stderr, " %02x", rd8(p + k));
     fprintf(stderr, "  |");
@@ -73,9 +104,19 @@ static void show(uint32_t p) {
 }
 void rt_on_watch(CPU *c, uint32_t a) {
     if (watching_some && rt_watch[0] != 0xFF) {
+        // DR_WATCH_FROM=lo-hi: only the entries whose caller returns into that range (one function's calls)
+        static uint32_t from_lo = 1, from_hi;
+        if (from_lo == 1) {
+            const char *e = getenv("DR_WATCH_FROM"); char *dash = NULL;
+            from_lo = e ? (uint32_t)strtoul(e, &dash, 16) : 0;
+            from_hi = (dash && *dash == '-') ? (uint32_t)strtoul(dash + 1, NULL, 16) : from_lo;
+        }
+        if (from_lo && (rd32(c->esp) < from_lo || rd32(c->esp) > from_hi)) return;
         static struct { uint32_t a; int n; } seen[64];
+        static int watch_max;
+        if (!watch_max) watch_max = getenv("DR_WATCH_MAX") ? atoi(getenv("DR_WATCH_MAX")) : 40;
         for (int k = 0; k < 64; k++) {
-            if (seen[k].a == a || !seen[k].a) { seen[k].a = a; if (++seen[k].n > 40) return; break; }
+            if (seen[k].a == a || !seen[k].a) { seen[k].a = a; if (++seen[k].n > watch_max) return; break; }
         }
         fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
                 rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx);
@@ -327,9 +368,14 @@ void unimpl_import(CPU *c, const char *name) {
         static int log_objc = -1;
         if (log_objc < 0) log_objc = getenv("DR_LOG_OBJC") != NULL;
         uint32_t sel = last[slot].sel;
-        if (log_objc && sel > 0x1000 && sel < 0x04000000u)
-            fprintf(stderr, "  [msg] %s  to %08x  a=%08x,%08x  from %s\n", (const char *)G2H(sel),
-                    ARG(strstr(name, "_stret") ? 1 : 0), ARG(strstr(name, "_stret") ? 3 : 2), ARG(strstr(name, "_stret") ? 4 : 3), rt_func_name(rd32(c->esp)));
+        if (log_objc && sel > 0x1000 && sel < 0x04000000u) {
+            uint32_t a0 = ARG(strstr(name, "_stret") ? 3 : 2);
+            fprintf(stderr, "  [msg] %s  to %08x  a=%08x,%08x  from %s%s\n", (const char *)G2H(sel),
+                    ARG(strstr(name, "_stret") ? 1 : 0), a0, ARG(strstr(name, "_stret") ? 4 : 3), rt_func_name(rd32(c->esp)),
+                    strcasestr((const char *)G2H(sel), "url") || strcasestr((const char *)G2H(sel), "string") ||
+                    strcasestr((const char *)G2H(sel), "path") || strcasestr((const char *)G2H(sel), "title") ||
+                    strcasestr((const char *)G2H(sel), "file") || strcasestr((const char *)G2H(sel), "named") ? said(a0) : "");
+        }
     }
     last[slot].from = rd32(c->esp); last[slot].eax = 0xBADBAD00u;
     if (thunk < DR_THUNK_BASE) {
@@ -392,6 +438,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     trace_window_hook = window;
     watch_some();
     if (game_init) game_init();
+    signal(SIGTERM, on_term);   // a run stopped from outside still says which imports nobody answered
     signal(SIGUSR1, on_usr1);   // kill -USR1: what the thread that takes the signal was last told by the bridge
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
 }
@@ -423,10 +470,12 @@ static void on_fault(int sig, siginfo_t *info, void *uctx) {
     D->fault_addr = (uint32_t)(a - M);
     D->faulted = true;
     {   // where: the function, and who called it, by the chain of frames
-        char b[700]; int n = snprintf(b, sizeof b, "  [aot] guest fault at 0x%08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
+        char b[700]; int n = snprintf(b, sizeof b, "  [aot] guest fault at 0x%08x, last function entered %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
                                       D->fault_addr, rt_func_name(G.fn), G.eax, G.ecx, G.edx, G.ebx, G.esi, G.edi);
         uint32_t ebp = G.ebp;
-        for (int k = 0; k < 8 && ebp >= G.stack_lo && ebp + 8 <= G.stack_hi && n < 600; k++) {
+        // the thread's own stack, or one of the stacks the host's calls into the game run on
+        for (int k = 0; k < 12 && n < 600 && ((ebp >= G.stack_lo && ebp + 8 <= G.stack_hi) ||
+                                              (ebp >= 0x50000000u && ebp < 0x58800000u)); k++) {
             n += snprintf(b + n, sizeof b - (size_t)n, " %s", rt_func_name(rd32(ebp + 4)));
             uint32_t up = rd32(ebp); if (up <= ebp) break; ebp = up;
         }
@@ -568,6 +617,11 @@ uint32_t guest_call(CPU *c, uint32_t addr, int nargs, const uint32_t *args) {
 uint32_t guest_call_here(uint32_t addr, int nargs, const uint32_t *args) {
     if (!Dt) aot_thread_begin(NULL);
     uint32_t eax = 0;
+    // The stack to go below is where the translated code stands NOW. A shim of ours is called straight from
+    // translated code, with no hand-over to the bridge, so the bridge's copy of esp is from the last time there was
+    // one, further up: a helper run "below" that one ran over the frames of the functions still in progress (the
+    // copy helper of a block given to dispatch_async wrote over its caller's locals).
+    out();
     dr_cpu fake; fake.fail_eip = 0; fake.fault_addr = 0;   // "not this thread's": takes the stack below
     dr_cpu_call_nested(&fake, addr, args, nargs, 0, &eax);
     return eax;
