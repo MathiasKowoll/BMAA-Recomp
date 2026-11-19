@@ -372,6 +372,9 @@ void unimpl_import(CPU *c, const char *name) {
             uint32_t a0 = ARG(strstr(name, "_stret") ? 3 : 2);
             fprintf(stderr, "  [msg] %s  to %08x  a=%08x,%08x  from %s%s\n", (const char *)G2H(sel),
                     ARG(strstr(name, "_stret") ? 1 : 0), a0, ARG(strstr(name, "_stret") ? 4 : 3), rt_func_name(rd32(c->esp)),
+                    // only a message that takes an argument has one to show: what follows a selector without a
+                    // colon on the stack is whatever was there, and may be a handle to something that is no object
+                    !strchr((const char *)G2H(sel), ':') ? "" :
                     strcasestr((const char *)G2H(sel), "url") || strcasestr((const char *)G2H(sel), "string") ||
                     strcasestr((const char *)G2H(sel), "path") || strcasestr((const char *)G2H(sel), "title") ||
                     strcasestr((const char *)G2H(sel), "file") || strcasestr((const char *)G2H(sel), "named") ? said(a0) : "");
