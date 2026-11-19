@@ -79,6 +79,7 @@ static void on_usr1(int sig);
 static void on_term(int sig) {
     (void)sig;
     extern void dr_bridge_report_unimplemented(uint32_t top);
+    signal(SIGALRM, SIG_DFL); alarm(2);   // the report prints from a signal handler: if another thread holds stdout, die anyway
     dr_bridge_report_unimplemented(80);
     fflush(stdout);
     _exit(143);
