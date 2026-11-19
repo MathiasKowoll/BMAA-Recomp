@@ -71,8 +71,15 @@ $(BUILD)/dr/game.o: game.c $(M32_HDR)
 $(BUILD)/dr/threads.o: threads.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -fblocks -fobjc-arc -x objective-c -I$(M32)/runtime -c threads.c -o $@
-$(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o
-	$(CC) -arch arm64 $(DR_OBJ) $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/libgame32.a -lobjc -framework Foundation \
+$(BUILD)/dr/steam.o: steam.c $(M32_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c steam.c -o $@
+$(BUILD)/dr/dates.o: dates.c $(M32_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
+BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o
+$(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
+	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
 	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -o $@
 dr: $(BUILD)/dr-bmaa
 .PHONY: dr interp

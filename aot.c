@@ -174,8 +174,25 @@ static void import(CPU *c, uint32_t thunk) {
 }
 
 // Control goes to guest address t with the return address on the stack; when this returns, the address is popped.
+// Native functions the guest can call through a pointer (what dlsym hands it for a library answered natively):
+// addresses in a range of their own, each with a word of context.
+#define HOSTFN_BASE 0xFD000000u
+#define NHOSTFN 8192
+static struct { void (*fn)(CPU *, uint32_t); uint32_t ctx; } hostfns[NHOSTFN];
+static int nhostfns;
+uint32_t aot_host_fn(void (*fn)(CPU *, uint32_t), uint32_t ctx) {
+    int k = __atomic_fetch_add(&nhostfns, 1, __ATOMIC_SEQ_CST);
+    if (k >= NHOSTFN) { fprintf(stderr, "  [aot] out of native function addresses\n"); abort(); }
+    hostfns[k].fn = fn; hostfns[k].ctx = ctx;
+    return HOSTFN_BASE + 16u * (uint32_t)k;
+}
+
 static int stub_of_thunk(uint32_t t);
 static void enter(CPU *c, uint32_t t) {
+    if (t >= HOSTFN_BASE && t < HOSTFN_BASE + 16u * NHOSTFN) {
+        uint32_t k = (t - HOSTFN_BASE) / 16;
+        if (hostfns[k].fn) { hostfns[k].fn(c, hostfns[k].ctx); c->esp += 4; return; }
+    }
     if (t >= DR_THUNK_BASE) {
         // By its stub's function when it has one: that is this file's unimpl_import for most, and for the few
         // that threads.c answers itself (what creates threads and what blocks) it is that answer.
@@ -256,6 +273,20 @@ GJmp *gjmp_slot(uint32_t buf) {
     fprintf(stderr, "  [aot] out of jmp slots\n"); abort();
 }
 
+// The last calls this thread made into the bridge, kept to be shown when it faults: what the game was last told
+// is usually why.
+#define NLAST 48
+static _Thread_local struct { const char *name; uint32_t a[3], from, eax; } last[NLAST];
+static _Thread_local unsigned nlast;
+static void show_last(void) {
+    for (unsigned k = nlast > NLAST ? nlast - NLAST : 0; k < nlast; k++) {
+        char b[300];
+        int n = snprintf(b, sizeof b, "      %-44s a=%08x,%08x,%08x -> %08x  from %s\n", last[k % NLAST].name, last[k % NLAST].a[0],
+                         last[k % NLAST].a[1], last[k % NLAST].a[2], last[k % NLAST].eax, rt_func_name(last[k % NLAST].from));
+        write(2, b, (size_t)n);
+    }
+}
+
 void unimpl_import(CPU *c, const char *name) {
     if (!strcmp(name, "_longjmp") || !strcmp(name, "__longjmp") || !strcmp(name, "_siglongjmp")) {
         GJmp *j = gjmp_slot(ARG(0));
@@ -264,11 +295,15 @@ void unimpl_import(CPU *c, const char *name) {
     }
     uint32_t thunk = thunk_of(name);
     if (window_open) fprintf(stderr, "  [imp] %s  a=%08x,%08x,%08x,%08x  from %s\n", name, ARG(0), ARG(1), ARG(2), ARG(3), rt_func_name(rd32(c->esp)));
+    unsigned slot = nlast++ % NLAST;
+    last[slot].name = name; last[slot].a[0] = ARG(0); last[slot].a[1] = ARG(1); last[slot].a[2] = ARG(2);
+    last[slot].from = rd32(c->esp); last[slot].eax = 0xBADBAD00u;
     if (thunk < DR_THUNK_BASE) {
         fprintf(stderr, "  [aot] import %s has no thunk (its pointer holds 0x%08x), called from %s\n", name, thunk, rt_func_name(c->fn));
         stop(DR_ERR_IMPORT);
     }
     import(c, thunk);
+    last[slot].eax = c->eax;
 }
 
 // ---- what translated code calls for itself ----
@@ -351,6 +386,17 @@ static void on_fault(int sig, siginfo_t *info, void *uctx) {
     }
     D->fault_addr = (uint32_t)(a - M);
     D->faulted = true;
+    {   // where: the function, and who called it, by the chain of frames
+        char b[700]; int n = snprintf(b, sizeof b, "  [aot] guest fault at 0x%08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
+                                      D->fault_addr, rt_func_name(G.fn), G.eax, G.ecx, G.edx, G.ebx, G.esi, G.edi);
+        uint32_t ebp = G.ebp;
+        for (int k = 0; k < 8 && ebp >= G.stack_lo && ebp + 8 <= G.stack_hi && n < 600; k++) {
+            n += snprintf(b + n, sizeof b - (size_t)n, " %s", rt_func_name(rd32(ebp + 4)));
+            uint32_t up = rd32(ebp); if (up <= ebp) break; ebp = up;
+        }
+        b[n++] = '\n'; write(2, b, (size_t)n);
+        show_last();
+    }
     stop(DR_ERR_FAULT);
 }
 void dr_cpu_install_fault_handler(dr_cpu *cpu) {
