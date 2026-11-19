@@ -52,6 +52,7 @@ static void window(int on) { window_open = on; memset(rt_watch, on ? 0xFF : 0, s
 // DR_WATCH=addr,addr,...: those functions are printed each time they are entered (the first 40 times each), with
 // what their first four arguments point at, when they point into guest memory that is there.
 static void show_last(void);
+static void on_usr1(int sig);
 static int watching_some;
 static void watch_some(void) {
     const char *w = getenv("DR_WATCH");
@@ -287,15 +288,24 @@ GJmp *gjmp_slot(uint32_t buf) {
 // The last calls this thread made into the bridge, kept to be shown when it faults: what the game was last told
 // is usually why.
 #define NLAST 48
-static _Thread_local struct { const char *name; uint32_t a[3], from, eax; } last[NLAST];
+static _Thread_local struct { const char *name; uint32_t a[3], from, eax, sel; } last[NLAST];
 static _Thread_local unsigned nlast;
 static void show_last(void) {
     for (unsigned k = nlast > NLAST ? nlast - NLAST : 0; k < nlast; k++) {
         char b[300];
-        int n = snprintf(b, sizeof b, "      %-44s a=%08x,%08x,%08x -> %08x  from %s\n", last[k % NLAST].name, last[k % NLAST].a[0],
+        uint32_t sel = last[k % NLAST].sel;
+        const char *what = (sel > 0x1000 && sel < 0x04000000u) ? (const char *)G2H(sel) : last[k % NLAST].name;
+        int n = snprintf(b, sizeof b, "      %s%-44.60s a=%08x,%08x,%08x -> %08x  from %s\n", sel ? "@ " : "", what, last[k % NLAST].a[0],
                          last[k % NLAST].a[1], last[k % NLAST].a[2], last[k % NLAST].eax, rt_func_name(last[k % NLAST].from));
         write(2, b, (size_t)n);
     }
+}
+
+static void on_usr1(int sig) {
+    (void)sig;
+    char b[160]; int n = snprintf(b, sizeof b, "  [aot] SIGUSR1: this thread is in %s; its last calls into the bridge:\n", Gt ? rt_func_name(G.fn) : "no guest code");
+    write(2, b, (size_t)n);
+    show_last();
 }
 
 void unimpl_import(CPU *c, const char *name) {
@@ -312,6 +322,15 @@ void unimpl_import(CPU *c, const char *name) {
     }
     unsigned slot = nlast++ % NLAST;
     last[slot].name = name; last[slot].a[0] = ARG(0); last[slot].a[1] = ARG(1); last[slot].a[2] = ARG(2);
+    last[slot].sel = !strncmp(name, "_objc_msgSend", 13) ? ARG(strstr(name, "_stret") ? 2 : 1) : 0;
+    {   // DR_LOG_OBJC: every Objective-C message the game sends, by name, with its receiver and who sent it
+        static int log_objc = -1;
+        if (log_objc < 0) log_objc = getenv("DR_LOG_OBJC") != NULL;
+        uint32_t sel = last[slot].sel;
+        if (log_objc && sel > 0x1000 && sel < 0x04000000u)
+            fprintf(stderr, "  [msg] %s  to %08x  a=%08x,%08x  from %s\n", (const char *)G2H(sel),
+                    ARG(strstr(name, "_stret") ? 1 : 0), ARG(strstr(name, "_stret") ? 3 : 2), ARG(strstr(name, "_stret") ? 4 : 3), rt_func_name(rd32(c->esp)));
+    }
     last[slot].from = rd32(c->esp); last[slot].eax = 0xBADBAD00u;
     if (thunk < DR_THUNK_BASE) {
         fprintf(stderr, "  [aot] import %s has no thunk (its pointer holds 0x%08x), called from %s\n", name, thunk, rt_func_name(c->fn));
@@ -373,6 +392,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     trace_window_hook = window;
     watch_some();
     if (game_init) game_init();
+    signal(SIGUSR1, on_usr1);   // kill -USR1: what the thread that takes the signal was last told by the bridge
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
 }
 
@@ -460,6 +480,12 @@ dr_status dr_cpu_run(dr_cpu *cpu) {
 // stack below where it stands, which is free while the thread is inside the bridge or the host.
 dr_status dr_cpu_call_nested(dr_cpu *given, uint32_t func, const uint32_t *args, int argc, uint32_t stack_top,
                              uint32_t *out_eax) {
+    return dr_cpu_call_nested2(given, func, args, argc, stack_top, out_eax, NULL, NULL);
+}
+
+// The same, handing back edx too and, when asked, popping st(0): how a guest method returns a float or a double.
+dr_status dr_cpu_call_nested2(dr_cpu *given, uint32_t func, const uint32_t *args, int argc, uint32_t stack_top,
+                              uint32_t *out_eax, uint32_t *out_edx, double *out_st0) {
     if (!Dt) aot_thread_begin(NULL);
     dr_cpu *cpu = Dt;
     if (cpu != given) stack_top = (cpu->regs[DR_ESP] ? cpu->regs[DR_ESP] : G.esp) - 1024;
@@ -479,6 +505,8 @@ dr_status dr_cpu_call_nested(dr_cpu *given, uint32_t func, const uint32_t *args,
 
     dr_status st = run();
     if (out_eax) *out_eax = cpu->regs[DR_EAX];
+    if (out_edx) *out_edx = cpu->regs[DR_EDX];
+    if (out_st0 && st == DR_HALT_RET) { *out_st0 = cpu->st[cpu->fpu_top]; cpu->fpu_top = (cpu->fpu_top + 1) & 7; }
     cpu->fail_eip = (st == DR_OK || st == DR_HALT_RET) ? 0 : cpu->eip;
     given->fail_eip = cpu->fail_eip;
     if (cpu != given && st == DR_ERR_FAULT) given->fault_addr = cpu->fault_addr;
