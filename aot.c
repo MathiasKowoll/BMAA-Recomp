@@ -51,6 +51,7 @@ static int window_open;
 static void window(int on) { window_open = on; memset(rt_watch, on ? 0xFF : 0, sizeof rt_watch); }
 // DR_WATCH=addr,addr,...: those functions are printed each time they are entered (the first 40 times each), with
 // what their first four arguments point at, when they point into guest memory that is there.
+static void show_last(void);
 static int watching_some;
 static void watch_some(void) {
     const char *w = getenv("DR_WATCH");
@@ -78,6 +79,7 @@ void rt_on_watch(CPU *c, uint32_t a) {
         fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
                 rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx);
         for (int k = 1; k <= 4; k++) show(rd32(c->esp + 4 * k));
+        if (getenv("DR_WATCH_LAST")) show_last();   // and what this thread was last told by the bridge
         return;
     }
     fprintf(stderr, "  [fn] %08x %s  ret=%08x a=%08x,%08x,%08x  eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x esp=%08x\n",
@@ -187,8 +189,17 @@ uint32_t aot_host_fn(void (*fn)(CPU *, uint32_t), uint32_t ctx) {
     return HOSTFN_BASE + 16u * (uint32_t)k;
 }
 
+// A guest function answered natively when it is reached through a pointer (a virtual method, a stage of a table):
+// the project lists the few it needs (game.c). hle.txt does the same for direct calls.
+static struct { uint32_t addr; void (*fn)(CPU *); } overrides[16];
+static int noverrides;
+void aot_override(uint32_t addr, void (*fn)(CPU *)) { if (noverrides < 16) { overrides[noverrides].addr = addr; overrides[noverrides++].fn = fn; } }
+void game_init(void) __attribute__((weak));
+
 static int stub_of_thunk(uint32_t t);
 static void enter(CPU *c, uint32_t t) {
+    for (int k = 0; k < noverrides; k++)
+        if (overrides[k].addr == t) { overrides[k].fn(c); c->esp += 4; return; }
     if (t >= HOSTFN_BASE && t < HOSTFN_BASE + 16u * NHOSTFN) {
         uint32_t k = (t - HOSTFN_BASE) / 16;
         if (hostfns[k].fn) { hostfns[k].fn(c, hostfns[k].ctx); c->esp += 4; return; }
@@ -295,6 +306,10 @@ void unimpl_import(CPU *c, const char *name) {
     }
     uint32_t thunk = thunk_of(name);
     if (window_open) fprintf(stderr, "  [imp] %s  a=%08x,%08x,%08x,%08x  from %s\n", name, ARG(0), ARG(1), ARG(2), ARG(3), rt_func_name(rd32(c->esp)));
+    if (!strcmp(name, "_exit") || !strcmp(name, "__Exit")) {   // what it was told before it chose to leave
+        fprintf(stderr, "  [aot] the game calls %s(%d); this thread's last calls into the bridge:\n", name, (int)ARG(0));
+        show_last();
+    }
     unsigned slot = nlast++ % NLAST;
     last[slot].name = name; last[slot].a[0] = ARG(0); last[slot].a[1] = ARG(1); last[slot].a[2] = ARG(2);
     last[slot].from = rd32(c->esp); last[slot].eax = 0xBADBAD00u;
@@ -357,6 +372,7 @@ void dr_cpu_init(dr_cpu *cpu, dr_guest *g) {
     dr_host_call_leave = host_call_leave;
     trace_window_hook = window;
     watch_some();
+    if (game_init) game_init();
     printf("cpu       : codigo traducido (%d funciones), no el interprete\n", ngfuncs);
 }
 

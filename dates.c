@@ -45,3 +45,16 @@ void I__CFGregorianDateGetAbsoluteTime(CPU *c) {   // (CFGregorianDate by value:
     FPUSH(CFGregorianDateGetAbsoluteTime(g, zone(ARG(4))));
 }
 void I__CFAbsoluteTimeGetDayOfWeek(CPU *c) { RET(CFAbsoluteTimeGetDayOfWeek(argd(c, 0), zone(ARG(2)))); }
+
+// ---------- CoreGraphics functions that return a structure ----------
+// A CGRect is four CGFloat: `float` in the guest. It comes back through a hidden pointer, the first argument,
+// which the callee takes off the stack. The bridge answered zero and left the pointer there, and everything the
+// caller pushed afterwards was one slot off.
+#include <CoreGraphics/CoreGraphics.h>
+static void rect_out(CPU *c, CGRect r) {
+    uint32_t out = ARG(0);
+    wrf(out, (float)r.origin.x); wrf(out + 4, (float)r.origin.y); wrf(out + 8, (float)r.size.width); wrf(out + 12, (float)r.size.height);
+    RET(out);
+    c->esp += 4;
+}
+void I__CGDisplayBounds(CPU *c) { rect_out(c, CGDisplayBounds((CGDirectDisplayID)ARG(1))); }

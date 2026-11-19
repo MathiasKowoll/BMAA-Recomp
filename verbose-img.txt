@@ -1,0 +1,6 @@
+  [puente] _CGImageSourceCreateWithData(0xe00017fa, 0x0, 0x5bca)
+  [puente] stub: _CGImageSourceCreateWithData -> 0
+  [puente] _CFRelease(0xe00017fa, 0x0, 0x5bca)
+  [puente] __ZdlPv(0x6f970570, 0x1, 0x5bca)
+  [puente] __ZdlPv(0x66853810, 0x1, 0x5bca)
+  [puente] __ZdlPv(0x669139f0, 0x1, 0x5bca)
