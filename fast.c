@@ -17,7 +17,12 @@ void I____toupper(CPU *c) { RET(toupper((int)ARG(0))); }
 
 // The host's: the bridge answered it the same (trace.c replaces it with a fixed clock under DR_SAME_RANDOM, and
 // that replacement is what this call reaches too).
-void I__mach_absolute_time(CPU *c) { uint64_t t = mach_absolute_time(); c->eax = (uint32_t)t; c->edx = (uint32_t)(t >> 32); }
+// In nanoseconds, with a time base of 1/1: what every Intel Mac this game ever ran on gave it. Apple Silicon counts
+// in ticks of 125/3 ns, and code written for Intel reads the counter as nanoseconds in places without asking for the
+// time base: the engine's 60-a-second frame limiter then waited 41.67 times too long (1.5 frames a second).
+#include <time.h>
+void I__mach_absolute_time(CPU *c) { uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); c->eax = (uint32_t)t; c->edx = (uint32_t)(t >> 32); }
+void I__mach_timebase_info(CPU *c) { if (ARG(0)) { wr32(ARG(0), 1); wr32(ARG(0) + 4, 1); } RET(0); }
 
 void I__memcpy(CPU *c)  { memmove(G2H(ARG(0)), G2H(ARG(1)), ARG(2)); RET(ARG(0)); }
 void I__memmove(CPU *c) { memmove(G2H(ARG(0)), G2H(ARG(1)), ARG(2)); RET(ARG(0)); }

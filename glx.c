@@ -13,6 +13,7 @@
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl3ext.h>
 #include <pthread.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,6 +185,15 @@ static void dump_frame(void) {
     static int frame; static const char *path; static int at = -1;
     if (at < 0) { path = getenv("BMAA_GL_DUMP"); at = getenv("BMAA_GL_DUMP_FRAME") ? atoi(getenv("BMAA_GL_DUMP_FRAME")) : 100; }
     frame++;
+    {   // BMAA_GL_FPS=1: frames shown, every five seconds
+        static int fps = -1, last; static double t0;
+        if (fps < 0) fps = getenv("BMAA_GL_FPS") != NULL;
+        if (fps) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double t = ts.tv_sec + ts.tv_nsec / 1e9;
+            if (!t0) t0 = t;
+            if (t - t0 >= 5) { fprintf(stderr, "  [gl] %.1f frames a second (frame %d)\n", (frame - last) / (t - t0), frame); t0 = t; last = frame; }
+        }
+    }
     if (!path || frame < at || (frame - at) % 300) return;
     GLint vp[4], fb = 0, rb = 0; glGetIntegerv(GL_VIEWPORT, vp); glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb); glGetIntegerv(GL_READ_BUFFER, &rb);
     int w = vp[0] + vp[2], h = vp[1] + vp[3];

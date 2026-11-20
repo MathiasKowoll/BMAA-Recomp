@@ -34,10 +34,10 @@ DR_FLAGS = -O2 -g -arch arm64 -std=c11 -Wall -Wextra -Wno-unused-parameter -I$(D
 $(DR_HDR): $(wildcard $(DR)/include/*.h) $(DR)/src/guest.c Makefile
 	@mkdir -p $(DR_INC)
 	cp $(DR)/include/*.h $(DR_INC)/
-	sed -i '' 's/^#define DR_HEAP_SIZE 0x20000000u.*/#define DR_HEAP_SIZE 0x40000000u \/* 1 GB (BMAA-Recomp) *\//' $(DR_INC)/dr_guest.h
-	grep -q 'DR_HEAP_SIZE 0x40000000u' $(DR_INC)/dr_guest.h
-	sed 's/^#define HEAP_NCLASES 141u/#define HEAP_NCLASES 145u/' $(DR)/src/guest.c > $(BUILD)/dr-src/guest.c
-	grep -q 'HEAP_NCLASES 145u' $(BUILD)/dr-src/guest.c
+	sed -i '' 's/^#define DR_HEAP_SIZE 0x20000000u.*/#define DR_HEAP_SIZE 0x80000000u \/* 2 GB (BMAA-Recomp) *\//' $(DR_INC)/dr_guest.h
+	grep -q 'DR_HEAP_SIZE 0x80000000u' $(DR_INC)/dr_guest.h
+	sed 's/^#define HEAP_NCLASES 141u/#define HEAP_NCLASES 149u/' $(DR)/src/guest.c > $(BUILD)/dr-src/guest.c
+	grep -q 'HEAP_NCLASES 149u' $(BUILD)/dr-src/guest.c
 	touch $@
 $(BUILD)/dr/guest.o: $(DR_HDR)
 	@mkdir -p $(dir $@)
