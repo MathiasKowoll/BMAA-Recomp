@@ -252,8 +252,10 @@ static void import_report(void) {
 }
 static void prof_report(void);
 void heapdbg_report(void);
+void objc_sel_report(void);
 static void big_lock_report(void) {
     import_report();
+    objc_sel_report();
     heapdbg_report();
     prof_report();
     if (!lock_stats) return;

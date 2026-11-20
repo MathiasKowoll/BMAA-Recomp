@@ -165,3 +165,64 @@ void I__AbsoluteToDuration(CPU *c) {
     c->eax = ns >= 1000000ull ? (uint32_t)(int32_t)(ns / 1000000ull) : (uint32_t)(int32_t)(-(int64_t)(ns / 1000ull));
 }
 void I__AbsoluteToNanoseconds(CPU *c) { c->eax = ARG(0); c->edx = ARG(1); }
+
+// DR_IMPORT_STATS: which Objective-C messages the game sends, by selector (the general way costs over ten
+// microseconds a message, so the ones sent every frame are the next to answer directly).
+#include <stdio.h>
+#include <pthread.h>
+static struct { const char *sel; uint64_t n, ns; } sels[1024];
+static pthread_mutex_t sels_mx = PTHREAD_MUTEX_INITIALIZER;
+static void sel_count(uint32_t sel, uint64_t ns) {
+    if (!sel || sel >= 0xE0000000u) return;
+    const char *name = (const char *)G2H(sel);
+    pthread_mutex_lock(&sels_mx);
+    for (int i = 0; i < 1024; i++) {
+        if (!sels[i].sel) sels[i].sel = name;
+        if (sels[i].sel == name || !strcmp(sels[i].sel, name)) { sels[i].n++; sels[i].ns += ns; break; }
+    }
+    pthread_mutex_unlock(&sels_mx);
+}
+void objc_chain_report(void);
+void objc_sel_report(void) {
+    objc_chain_report();
+    for (int r = 0; r < 30; r++) {
+        int best = -1;
+        for (int i = 0; i < 1024 && sels[i].sel; i++) if (sels[i].ns && (best < 0 || sels[i].ns > sels[best].ns)) best = i;
+        if (best < 0) break;
+        fprintf(stderr, "  [objc-sel] %8.2f s %9llu  %s\n", sels[best].ns / 1e9, (unsigned long long)sels[best].n, sels[best].sel);
+        sels[best].ns = 0;
+    }
+}
+static int sel_stats(void) { static int v = -1; if (v < 0) v = getenv("DR_IMPORT_STATS") != NULL; return v; }
+const char *rt_func_name(uint32_t a);
+static struct { uint32_t ra[5]; uint64_t n; } chains[64];
+static void chain_count(CPU *c) {            // who sends it: the return addresses up the game's frames
+    uint32_t ra[5] = { rd32(c->esp) }, ebp = c->ebp;
+    for (int k = 1; k < 5; k++) { if (ebp < 0x1000 || ebp >= 0xE0000000u) break; ra[k] = rd32(ebp + 4); ebp = rd32(ebp); }
+    pthread_mutex_lock(&sels_mx);
+    for (int i = 0; i < 64; i++) {
+        if (!chains[i].n) memcpy(chains[i].ra, ra, sizeof ra);
+        if (!memcmp(chains[i].ra, ra, sizeof ra)) { chains[i].n++; break; }
+    }
+    pthread_mutex_unlock(&sels_mx);
+}
+void objc_chain_report(void) {
+    for (int i = 0; i < 64 && chains[i].n; i++) {
+        fprintf(stderr, "  [objc-who] %8llu ", (unsigned long long)chains[i].n);
+        for (int k = 0; k < 5; k++) fprintf(stderr, " %s", chains[i].ra[k] ? rt_func_name(chains[i].ra[k]) : "-");
+        fputc('\n', stderr);
+    }
+}
+void I__objc_msgSend(CPU *c) {
+    if (!sel_stats()) { unimpl_import(c, "_objc_msgSend"); return; }
+    uint32_t sel = ARG(1); uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (sel && sel < 0xE0000000u && !strcmp((const char *)G2H(sel), "screens")) chain_count(c);
+    unimpl_import(c, "_objc_msgSend");
+    sel_count(sel, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+}
+void I__objc_msgSend_stret(CPU *c) {
+    if (!sel_stats()) { unimpl_import(c, "_objc_msgSend_stret"); return; }
+    uint32_t sel = ARG(2); uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    unimpl_import(c, "_objc_msgSend_stret");
+    sel_count(sel, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+}
