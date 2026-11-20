@@ -60,3 +60,14 @@ void H_speaker_layout(CPU *c) {
     if (ARG(2)) wr32(ARG(2), 2);
     c->eax = 1;
 }
+
+// The engine's queue of rendering commands is a ring buffer written by the game thread and read by the rendering
+// thread with no lock: the writer stores the command and then moves the write pointer, and the reader reads the
+// pointer and then the command. That is right on Intel, where stores are seen by other processors in the order
+// they were made; on ARM they are not, and the rendering thread took a command that was not there yet (a call
+// through its garbage vtable, the moment a movie handed the picture back to the game). A full memory barrier where
+// the pointer is published and where it has been read puts the order back. The functions themselves are the game's.
+void F_300600(CPU *c); void F_300670(CPU *c); void F_3006e0(CPU *c);
+void H_ring_commit(CPU *c)   { __atomic_thread_fence(__ATOMIC_SEQ_CST); F_300600(c); __atomic_thread_fence(__ATOMIC_SEQ_CST); c->esp -= 4; }
+void H_ring_commit_b(CPU *c) { __atomic_thread_fence(__ATOMIC_SEQ_CST); F_300670(c); __atomic_thread_fence(__ATOMIC_SEQ_CST); c->esp -= 4; }
+void H_ring_read(CPU *c)     { __atomic_thread_fence(__ATOMIC_SEQ_CST); F_3006e0(c); __atomic_thread_fence(__ATOMIC_SEQ_CST); c->esp -= 4; }

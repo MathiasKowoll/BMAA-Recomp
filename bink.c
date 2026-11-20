@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 uint32_t aot_malloc(uint32_t n); void aot_free(uint32_t p);
 void unimpl_import(CPU *c, const char *name);
@@ -47,6 +48,7 @@ struct movie {
     int paused; uint64_t paused_at;
     AudioQueueRef q; pthread_mutex_t lock;
     float *ring; unsigned rd, wr, fill;
+    float gain, last[2]; int closing, stopped;   // the level the sound is at, for a start and an end without a click
     unsigned gbase, glen, gw[NTRACK];   // the stretch being filled: where it starts, how long, how far each track got
 };
 static struct movie movies[NMOVIE];
@@ -77,15 +79,28 @@ static int64_t mem_seek(void *o, int64_t p, int whence) {
 }
 
 // ---- sound ----
+// The sound never starts or stops on a full sample: it rises over the first few milliseconds, and falls to nothing
+// when the movie closes or the queue runs dry, so that one movie ending and the next one starting make no click.
 static void aq_fill(void *o, AudioQueueRef q, AudioQueueBufferRef b) {
     struct movie *m = o;
     float *out = b->mAudioData; unsigned want = b->mAudioDataBytesCapacity / 4, got = 0;
+    const float step = 1.0f / 480.0f;                              // ten milliseconds from silence to full, or back
     pthread_mutex_lock(&m->lock);
-    while (got < want && m->fill && !m->paused) { out[got++] = m->ring[m->rd]; m->rd = (m->rd + 1) % RING; m->fill--; }
+    while (got + 1 < want) {
+        int have = m->fill >= 2 && !m->paused;
+        float target = (have && !m->closing && m->fill > 960) || (have && !m->closing && m->gain >= 1.0f) ? 1.0f : 0.0f;
+        if (have) {
+            m->last[0] = m->ring[m->rd]; m->last[1] = m->ring[(m->rd + 1) % RING];
+            m->rd = (m->rd + 2) % RING; m->fill -= 2;
+        } else if (m->gain <= 0) break;                            // nothing left and already silent
+        if (m->gain < target) { m->gain += step; if (m->gain > 1) m->gain = 1; }
+        else if (m->gain > target || !have) { m->gain -= step; if (m->gain < 0) m->gain = 0; }
+        out[got++] = m->last[0] * m->gain; out[got++] = m->last[1] * m->gain;
+    }
     pthread_mutex_unlock(&m->lock);
     while (got < want) out[got++] = 0;
     b->mAudioDataByteSize = want * 4;
-    AudioQueueEnqueueBuffer(q, b, 0, NULL);
+    if (!m->stopped) AudioQueueEnqueueBuffer(q, b, 0, NULL);
 }
 static void sound_open(struct movie *m) {
     if (!m->natrack) return;
@@ -170,7 +185,12 @@ static void copy_plane(uint32_t plane, const uint8_t *src, int stride, uint32_t 
 }
 
 static void movie_close(struct movie *m) {
-    if (m->q) { AudioQueueStop(m->q, true); AudioQueueDispose(m->q, true); pthread_mutex_destroy(&m->lock); }
+    if (m->q) {
+        m->closing = 1;                                            // let it fall to silence first (ten milliseconds)
+        for (int i = 0; i < 40 && m->gain > 0; i++) usleep(2000);
+        m->stopped = 1;
+        AudioQueueStop(m->q, true); AudioQueueDispose(m->q, true); pthread_mutex_destroy(&m->lock);
+    }
     free(m->ring);
     if (m->vdec) avcodec_free_context(&m->vdec);
     for (int k = 0; k < m->natrack; k++) avcodec_free_context(&m->adec[k]);

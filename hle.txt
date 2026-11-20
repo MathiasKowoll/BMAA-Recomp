@@ -4,3 +4,6 @@
 1b9b190 skip_1b9b190
 1c97620 open_system_bundle
 1c11830 speaker_layout
+300600 ring_commit
+300670 ring_commit_b
+3006e0 ring_read
