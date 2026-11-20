@@ -3,3 +3,4 @@
 1c05da0 skip_1c05da0
 1b9b190 skip_1b9b190
 1c97620 open_system_bundle
+1c11830 speaker_layout

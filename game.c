@@ -50,3 +50,13 @@ void H_open_system_bundle(CPU *c) {
     aot_unlock();
     if (h) { wr32(out, h); c->eax = 0; } else c->eax = (uint32_t)-1;
 }
+
+// sub_1c11830(this, layout out, channel count out) -> true: how the speakers are laid out, asked before the sound
+// device is opened by building an AUGraph, taking its output unit's device and reading that device's preferred
+// channel layout (a variable-size structure). Answered as two-channel stereo, the game's own codes for it (2, 2):
+// the answer every Mac's built-in output and headphones give. A surround set-up plays as stereo until this asks.
+void H_speaker_layout(CPU *c) {
+    if (ARG(1)) wr32(ARG(1), 2);
+    if (ARG(2)) wr32(ARG(2), 2);
+    c->eax = 1;
+}

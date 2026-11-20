@@ -99,3 +99,16 @@ void I__gettimeofday(CPU *c) {
     if (ARG(1)) { wr32(ARG(1), 0); wr32(ARG(1) + 4, 0); }
     RET(0);
 }
+
+// task_info(task, MACH_TASK_BASIC_INFO, out, count in and out): the engine reads its own memory use every frame.
+// The structure is packed the same way in both worlds (64-bit sizes, 4-byte packing), so the Mac's own goes in.
+#include <mach/mach.h>
+void I__task_info(CPU *c) {
+    if (ARG(1) != MACH_TASK_BASIC_INFO || !ARG(2) || !ARG(3)) { unimpl_import(c, "_task_info"); return; }
+    mach_msg_type_number_t n = rd32(ARG(3));
+    struct mach_task_basic_info info;
+    if (n > MACH_TASK_BASIC_INFO_COUNT) n = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t k = task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &n);
+    if (!k) { memcpy(G2H(ARG(2)), &info, n * sizeof(natural_t)); wr32(ARG(3), n); }
+    c->eax = (uint32_t)k;
+}

@@ -43,6 +43,25 @@ void dbg_init(void) {
                 }
             }
         }
+        // DBG_GAME_CLICK=x,y: once the launcher is gone, a left click at that point (points from the top left) of every
+        // other visible window with a view, again inside this process only
+        if (getenv("DBG_GAME_CLICK")) {
+            double x = 0, y = 0; sscanf(getenv("DBG_GAME_CLICK"), "%lf,%lf", &x, &y);
+            BOOL launcher = NO;
+            for (NSWindow *w in [NSApp windows]) if (w.isVisible && [w.title containsString:@"Options"]) launcher = YES;
+            for (NSWindow *w in [NSApp windows]) {
+                if (launcher || !w.isVisible || !w.contentView || [w isKindOfClass:[NSPanel class]]) continue;
+                if (!w.isKeyWindow) [w makeKeyWindow];
+                NSPoint pt = NSMakePoint(x, w.contentView.bounds.size.height - y);
+                for (int k = 0; k < 2; k++) {
+                    NSEvent *e = [NSEvent mouseEventWithType:k ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDown location:pt
+                                               modifierFlags:0 timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                                windowNumber:w.windowNumber context:nil eventNumber:k clickCount:1 pressure:k ? 0 : 1];
+                    fprintf(stderr, "  [click] %s at %.0f,%.0f in \"%s\" (%s)\n", k ? "up" : "down", pt.x, pt.y, w.title.UTF8String, object_getClassName(w));
+                    [NSApp sendEvent:e];
+                }
+            }
+        }
         for (NSWindow *w in [NSApp windows]) {
             fprintf(stderr, "  [views] window \"%s\" %s frame %s visible %d key %d alpha %.2f opaque %d\n", w.title.UTF8String,
                     object_getClassName(w), NSStringFromRect(w.frame).UTF8String, w.isVisible, w.isKeyWindow, w.alphaValue, w.isOpaque);
@@ -76,4 +95,33 @@ void dbg_init(void) {
         }
     });
     dispatch_resume(src);
+    // BMAA_AUTOPLAY=1: press the launcher's PLAY as soon as its page has the button (once), so the game starts without
+    // a click on the options window. Looked for once a second from the main queue.
+    if (getenv("BMAA_AUTOPLAY")) {
+        static dispatch_source_t t;
+        t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+        dispatch_source_set_event_handler(t, ^{
+            for (NSWindow *w in [NSApp windows]) {
+                NSMutableArray *todo = [NSMutableArray arrayWithObject:w.contentView ?: (NSView *)NSNull.null];
+                while (todo.count) {
+                    NSView *v = todo.lastObject; [todo removeLastObject];
+                    if (![v isKindOfClass:[NSView class]]) continue;
+                    [todo addObjectsFromArray:v.subviews];
+                    if (![v respondsToSelector:@selector(stringByEvaluatingJavaScriptFromString:)]) continue;
+                    NSString *r = [(id)v performSelector:@selector(stringByEvaluatingJavaScriptFromString:) withObject:
+                        @"(function(){var b=document.getElementById('main-playButton-0'); if(!b||document.readyState!='complete') return '';"
+                         "window.__n=(window.__n||0)+1; if(window.__n%5!=4) return 'ok';"
+                         "var o=document.getElementById('loadingOverlay'); if(o) o.style.display='none'; b.click(); return 'ok';})()"];
+                    // the page takes the press only once its own scripts have settled: wait three seconds after it is
+                    // first seen ready, and press again every five while the launcher is still up
+                    static int seen;
+                    if (![r isEqual:@"ok"] || !w.isVisible) continue;
+                    if (seen++ % 5 == 3) fprintf(stderr, "  [page] PLAY pressed for the user (BMAA_AUTOPLAY)\n");
+                    return;
+                }
+            }
+        });
+        dispatch_resume(t);
+    }
 }
