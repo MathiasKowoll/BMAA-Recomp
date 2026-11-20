@@ -98,6 +98,20 @@ static void inject_poll(void) {
         // what the game holds about its pads at this moment (its manager object is the callbacks' context)
         uint32_t m = cb_value[1];
         fprintf(stderr, "  [pad] test: the game's input-off flag is %u\n", rd32(0x37c3a9c) & 255);
+        if (m) {   // its table of known pads, by (product << 16 | vendor): how many, and is ours in it
+            uint32_t n = rd32(m + 0x5c), want = 0x028e045e, found = 0, shown = 0;
+            fprintf(stderr, "  [pad] test: the game knows %u pad definitions;", rd32(m + 0x68));
+            uint32_t st[64]; int sp = 0;
+            while ((n > 0x1000 || sp) && shown < 400) {
+                while (n > 0x1000 && sp < 64) { st[sp++] = n; n = rd32(n + 8); }
+                if (!sp) break;
+                n = st[--sp];
+                if (rd32(n + 0x10) == want) found = 1;
+                if (shown++ < 12) fprintf(stderr, " %x", rd32(n + 0x10));
+                n = rd32(n + 0xc);
+            }
+            fprintf(stderr, " ... ours %s\n", found ? "is there" : "is NOT there");
+        }
         for (int i = 0; m && i < 32; i++) {
             uint32_t d = rd32(m + 0x84 + 4 * i); if (!d) continue;
             fprintf(stderr, "  [pad] test: game slot %d: device 0x%x id 0x%x connected %u, %u configuration(s)\n",
@@ -321,4 +335,48 @@ void I__CFDictionaryGetKeysAndValues(CPU *c) {
         if (ARG(2)) wr32(ARG(2) + 4 * (uint32_t)i, handle(v[i]));
     }
     free(k); free(v);
+}
+
+// CFDictionaryGetCountOfKey(dictionary, key): how the game asks a pad definition "is there a ButtonA?". It had no
+// answer and so said 0 to every name: the configuration came out with no controls at all.
+void I__CFDictionaryGetCountOfKey(CPU *c) {
+    CFDictionaryRef d = host(ARG(0));
+    uint32_t k = ARG(1);
+    RET(0);
+    if (getenv("BMAA_TRACE_PAD")) fprintf(stderr, "  [pad] CountOfKey(0x%x -> %p, 0x%x)\n", ARG(0), (void *)d, k);
+    if (!d || !k) return;
+    if (k >= DR_OBJC_HANDLE_BASE) { CFTypeRef key = host(k); if (key) RET(CFDictionaryGetCountOfKey(d, key)); return; }
+    uint32_t bytes = rd32(k + 8), len = rd32(k + 12);        // a constant string of the game's: { isa, flags, bytes, length }
+    if (!bytes || len > 4096) return;
+    CFStringRef key = CFStringCreateWithBytes(NULL, G2H(bytes), len, kCFStringEncodingUTF8, false);
+    if (key) { RET(CFDictionaryGetCountOfKey(d, key)); CFRelease(key); }
+}
+
+// The game also watches the USB bus for the old Xbox 360 driver's devices coming and going (IOKit notifications on
+// the pad thread's run loop). Pads reach it through GameController here, so that watch has nothing to see: the port
+// is a word of the game's memory, it has no run-loop source, and a notification registers with an empty iterator.
+// (Through the general way the port came back as nothing and CFRunLoopAddSource fell over a NULL source.)
+static uint32_t note_port;
+void I__IONotificationPortCreate(CPU *c) {
+    if (off()) { unimpl_import(c, "_IONotificationPortCreate"); return; }
+    if (!note_port) note_port = aot_malloc(16);
+    RET(note_port);
+}
+void I__IONotificationPortGetRunLoopSource(CPU *c) {
+    if (off()) { unimpl_import(c, "_IONotificationPortGetRunLoopSource"); return; }
+    RET(0);
+}
+// (port, type, matching dictionary (consumed), callback, context, iterator out)
+void I__IOServiceAddMatchingNotification(CPU *c) {
+    if (off()) { unimpl_import(c, "_IOServiceAddMatchingNotification"); return; }
+    if (ARG(5)) wr32(ARG(5), 0);
+    RET(0);
+}
+void I__CFRunLoopAddSource(CPU *c) {
+    if (!ARG(1)) return;                                   // no source: nothing to add
+    unimpl_import(c, "_CFRunLoopAddSource");
+}
+void I__IOIteratorNext(CPU *c) {
+    if (!ARG(0)) { RET(0); return; }                       // the empty iterator above
+    unimpl_import(c, "_IOIteratorNext");
 }

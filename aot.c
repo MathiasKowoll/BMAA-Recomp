@@ -747,6 +747,7 @@ static void on_fault(int sig, siginfo_t *info, void *uctx) {
         int n = snprintf(b, sizeof b, "  [aot] host fault at %p (guest memory is %p..%p), in or under guest %s\n",
                          (void *)a, (void *)M, (void *)(M + DR_GUEST_SIZE), Gt ? rt_func_name(G.fn) : "no guest thread");
         write(2, b, (size_t)n);
+        { void *fr[40]; int nf = backtrace(fr, 40); backtrace_symbols_fd(fr, nf, 2); }   // where in the host
         _exit(139);
     }
     D->fault_addr = (uint32_t)(a - M);
