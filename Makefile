@@ -76,6 +76,8 @@ $(BUILD)/dr/steam.o: steam.c $(M32_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c steam.c -o $@
 $(BUILD)/dr/pad.o: pad.m $(M32_HDR) $(DR_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -Wno-unused-parameter -I$(DR_INC) -I$(M32)/runtime -c pad.m -o $@
+$(BUILD)/dr/fps.o: fps.m
+	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c fps.m -o $@
 $(BUILD)/dr/dbg.o: dbg.m
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c dbg.m -o $@
 $(BUILD)/dr/ct.o: ct.c $(M32_HDR) $(DR_HDR)
@@ -111,7 +113,7 @@ $(BUILD)/dr/fast.o: fast.c $(M32_HDR)
 $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
-BMAA_OBJ = $(BUILD)/dr/au.o $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/al.o $(BUILD)/dr/pad.o $(BUILD)/dr/input.o $(BUILD)/dr/heapdbg.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
+BMAA_OBJ = $(BUILD)/dr/fps.o $(BUILD)/dr/au.o $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/al.o $(BUILD)/dr/pad.o $(BUILD)/dr/input.o $(BUILD)/dr/heapdbg.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
 	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
 	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework OpenGL -framework OpenAL -framework AudioToolbox -framework CoreAudio -framework GameController -framework Carbon -o $@

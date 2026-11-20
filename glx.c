@@ -208,7 +208,8 @@ static void dump_frame(void) {
     fprintf(stderr, "  [gl] frame %d written to %s (%dx%d, error 0x%x)\n", frame, path, w, h, glGetError());
     free(px);
 }
-void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) dump_frame(); RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
+void fps_frame(void);
+void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { dump_frame(); fps_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
 void I__CGLClearDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? CGLClearDrawable(x) : kCGLBadContext); }
 void I__CGLGetShareGroup(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? handle(CGLGetShareGroup(x)) : 0); }
 void I__CGLQueryRendererInfo(CPU *c) {
