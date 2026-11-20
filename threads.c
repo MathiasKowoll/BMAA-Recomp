@@ -89,8 +89,15 @@ void I__pthread_cond_destroy(CPU *c) { RET(0); }
 void I__pthread_cond_signal(CPU *c) { RET(pthread_cond_signal(CV(ARG(0)))); }
 void I__pthread_cond_broadcast(CPU *c) { RET(pthread_cond_broadcast(CV(ARG(0)))); }
 void I__pthread_cond_wait(CPU *c) { RET(pthread_cond_wait(CV(ARG(0)), MX(ARG(1)))); }
-void I__pthread_cond_timedwait(CPU *c) {   // abstime: a 32-bit timespec
-    struct timespec ts = { (time_t)(int32_t)rd32(ARG(2)), (long)(int32_t)rd32(ARG(2) + 4) };
+// abstime: a 32-bit timespec. The physics library's wait (sub_27a3530) builds it as "now plus so many milliseconds"
+// without carrying the nanoseconds into the seconds, so about half the time tv_nsec is a billion or more. The 32-bit
+// pthread_cond_timedwait of the game's time took that as it was meant; today's refuses it at once (EINVAL), and a
+// wait that was to last until the simulation step is done came back immediately. The carry is made here.
+void I__pthread_cond_timedwait(CPU *c) {
+    int64_t sec = (int32_t)rd32(ARG(2)), nsec = (int32_t)rd32(ARG(2) + 4);
+    if (nsec >= 1000000000) { sec += nsec / 1000000000; nsec %= 1000000000; }
+    if (nsec < 0) nsec = 0;
+    struct timespec ts = { (time_t)sec, (long)nsec };
     RET(pthread_cond_timedwait(CV(ARG(0)), MX(ARG(1)), &ts));
 }
 

@@ -11,6 +11,12 @@ TEXT_HI   = 290be29
 HLE       = hle.txt
 APP_NAME  = BMAA
 GAME_SRC  = game32.c
+# Intel's memory ordering between threads for the translated code (rt.h, RT_TSO): the game's lock-free code relies on
+# it. Off by default: it did not change the cape and costs a quarter of the frame rate. `make TSO=1` builds with it.
+TSO ?= 0
+ifeq ($(TSO),1)
+EXTRA_CFLAGS += -DRT_TSO
+endif
 include $(FW)/mac32/mac32.mk
 
 .venv:

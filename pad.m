@@ -167,8 +167,9 @@ static void pads_scan(unsigned *came, unsigned *went) {
         pads[NPAD - 1].gc = (void *)kCFNull; pad_setup(&pads[NPAD - 1], NPAD - 1); *came |= 1u << (NPAD - 1);
         fprintf(stderr, "  [pad] test pad in slot %d\n", NPAD);
     }
+    static int no_real = -1; if (no_real < 0) no_real = getenv("BMAA_NO_REAL_PADS") != NULL;   // tests: only the test pad
     for (GCController *gc in all) {
-        if (!gc.extendedGamepad) continue;
+        if (no_real || !gc.extendedGamepad) continue;
         int have = 0, freeslot = -1;
         for (int s = 0; s < NPAD; s++) {
             if (pads[s].gc == (__bridge void *)gc) have = 1;
