@@ -230,3 +230,21 @@ void I__CFRunLoopStop(CPU *c) {
     if (!off() && hid_loop && ARG(0) == hid_loop) { stop = 1; return; }
     unimpl_import(c, "_CFRunLoopStop");
 }
+
+// CFNumberCreate(allocator, type, value pointer): the game builds its matching dictionaries with it, and the value is in
+// the game's memory, which the general way does not follow (it answered NULL, and the dictionary then refused the nil).
+// The game is 32-bit, so its long, CFIndex and NSInteger are 32 bits and its CGFloat is a float.
+void I__CFNumberCreate(CPU *c) {
+    uint32_t type = ARG(1), p = ARG(2);
+    CFNumberRef n = NULL;
+    if (p) switch (type) {
+    case 1: case 7: { int8_t v = (int8_t)rd32(p); n = CFNumberCreate(NULL, kCFNumberSInt8Type, &v); break; }
+    case 2: case 8: { int16_t v = (int16_t)rd32(p); n = CFNumberCreate(NULL, kCFNumberSInt16Type, &v); break; }
+    case 3: case 9: case 10: case 14: case 15: { int32_t v = (int32_t)rd32(p); n = CFNumberCreate(NULL, kCFNumberSInt32Type, &v); break; }
+    case 4: case 11: { int64_t v = (int64_t)((uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32); n = CFNumberCreate(NULL, kCFNumberSInt64Type, &v); break; }
+    case 5: case 12: case 16: { uint32_t b = rd32(p); float v; memcpy(&v, &b, 4); n = CFNumberCreate(NULL, kCFNumberFloat32Type, &v); break; }
+    case 6: case 13: { uint64_t b = (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32; double v; memcpy(&v, &b, 8); n = CFNumberCreate(NULL, kCFNumberFloat64Type, &v); break; }
+    default: fprintf(stderr, "  [cf] CFNumberCreate: type %u not known, refused\n", type);
+    }
+    RET(n ? handle(n) : 0);
+}
