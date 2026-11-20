@@ -380,8 +380,23 @@ static void enter(CPU *c, uint32_t t) {
     if (f) { f->fn(c); return; }
     for (int k = 0; k < ngstubs; k++)   // the address of a stub, taken as a function pointer
         if (gstubs[k].addr == t) { gstubs[k].fn(c); c->esp += 4; return; }
-    if (t < D->null_floor) stop(DR_ERR_NULLCALL);
+    if (t < D->null_floor) {
+        fprintf(stderr, "  [aot] call through a null pointer (0x%x), at %08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x\n",
+                t, rd32(c->esp), rt_func_name(rd32(c->esp)), c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi);
+        show_last();
+        stop(DR_ERR_NULLCALL);
+    }
     fprintf(stderr, "  [aot] call to 0x%08x, which is no function of the translation (from %s)\n", t, rt_func_name(c->fn));
+    {   // who made the call (the return address it pushed) and the frames above, and the registers it had
+        char b[600]; int n = snprintf(b, sizeof b, "  [aot]   called at %08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
+                                      rd32(c->esp), rt_func_name(rd32(c->esp)), c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi);
+        uint32_t ebp = c->ebp;
+        for (int k = 0; k < 10 && n < 520 && ebp > 0x10000 && ebp < 0xA0000000u; k++) {
+            n += snprintf(b + n, sizeof b - (size_t)n, " %s", rt_func_name(rd32(ebp + 4)));
+            uint32_t up = rd32(ebp); if (up <= ebp) break; ebp = up;
+        }
+        fprintf(stderr, "%s\n", b);
+    }
     if (t >= DR_UNRESOLVED_BASE) fprintf(stderr, "  [aot]   that is the marker of a data symbol nobody resolved\n");
     stop(DR_ERR_OPCODE);
 }
@@ -716,6 +731,7 @@ static dr_status run(void) {
     in();
     G.fn = D->eip;
     enter(&G, D->eip);       // returns when that function does, its return address (the sentinel) popped
+    if (G.exc) eh_uncaught(&G, rt_func_name(D->eip));   // a C++ exception nothing in the guest caught
     out();
     leave = outer;
     big_reacquire(held);
@@ -903,6 +919,13 @@ uint32_t guest_call_here(uint32_t addr, int nargs, const uint32_t *args) {
     return eax;
 }
 int aot_is_main_thread(void) { return Gt == &main_G; }
+uint32_t aot_malloc(uint32_t n); void aot_free(uint32_t p);
+// For the framework's eh.c: where the guest's exception objects live.
+uint32_t eh_guest_alloc(uint32_t n) { return aot_malloc(n); }
+void eh_guest_free(uint32_t p) { aot_free(p); }
+// For the native shims that use the bridge's tables (handles): its lock.
+void aot_lock(void) { big_lock(); }
+void aot_unlock(void) { big_unlock(); }
 uint32_t aot_stack_lo(void) { return Gt ? G.stack_lo : 0; }
 uint32_t aot_stack_hi(void) { return Gt ? G.stack_hi : 0; }
 // For threads.c: memory of the guest's, taken under the bridge's lock.

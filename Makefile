@@ -60,7 +60,7 @@ $(BUILD)/dr/x86.o: $(DR)/src/x86.c $(DR_HDR)
 	$(CC) $(DR_FLAGS) -c $< -o $@
 $(BUILD)/dr-interp: $(DR_OBJ) $(BUILD)/dr/x86.o $(BUILD)/dr/trace.o
 	$(CC) -arch arm64 $^ -lobjc -framework Foundation -framework AppKit -framework Metal -framework QuartzCore \
-	    -framework ImageIO -framework CoreGraphics -o $@
+	    -framework ImageIO -framework CoreGraphics -framework CoreText -o $@
 interp: $(BUILD)/dr-interp
 $(BUILD)/dr/aot.o: aot.c $(M32_HDR) $(DR_HDR)
 	@mkdir -p $(dir $@)
@@ -76,15 +76,21 @@ $(BUILD)/dr/steam.o: steam.c $(M32_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c steam.c -o $@
 $(BUILD)/dr/dbg.o: dbg.m
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c dbg.m -o $@
+$(BUILD)/dr/ct.o: ct.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -I$(DR_INC) -I$(M32)/runtime -c ct.c -o $@
+$(BUILD)/dr/eh.o: $(M32)/runtime/eh.c $(M32_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c $(M32)/runtime/eh.c -o $@
 $(BUILD)/dr/fast.o: fast.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c fast.c -o $@
 $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
-BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o
+BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
 	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
-	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -o $@
+	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -o $@
 dr: $(BUILD)/dr-bmaa
 .PHONY: dr interp
