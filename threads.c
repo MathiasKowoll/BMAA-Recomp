@@ -276,3 +276,49 @@ void I__sem_wait(CPU *c) { RET(sem_wait(obj(ARG(0)))); }
 void I__sem_post(CPU *c) { RET(sem_post(obj(ARG(0)))); }
 void I__sem_close(CPU *c) { RET(sem_close(obj(ARG(0)))); }
 void I__sem_unlink(CPU *c) { RET(sem_unlink((const char *)G2H(ARG(0)))); }
+
+// ---------- OSAtomic, spin locks, the memory barrier ----------
+// DecompRecomp answers these for its single-threaded interpreter: a compare-and-swap that reads and then writes, a
+// spin lock that writes 1 without waiting for anybody, a memory barrier that does nothing. With the game's threads
+// really running at once that is no exclusion at all (the cloth of the cape, simulated on several threads, came out
+// torn). Here they are the real operations on the game's memory, and the barrier is a barrier: on ARM it is needed.
+#include <sched.h>
+#define A32(g) ((uint32_t *)G2H(g))
+// bool OSAtomicCompareAndSwap32/Int/Ptr[Barrier](old, new, address)
+static void cas32(CPU *c) { uint32_t exp = ARG(0); RET(ARG(2) ? __atomic_compare_exchange_n(A32(ARG(2)), &exp, ARG(1), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) : 0); }
+void I__OSAtomicCompareAndSwap32(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwap32Barrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapInt(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapIntBarrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapPtr(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapPtrBarrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapLong(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapLongBarrier(CPU *c) { cas32(c); }
+// int32_t OSAtomicAdd32[Barrier](amount, address): the new value
+static void add32(CPU *c) { RET(ARG(1) ? __atomic_add_fetch(A32(ARG(1)), ARG(0), __ATOMIC_SEQ_CST) : 0); }
+void I__OSAtomicAdd32(CPU *c) { add32(c); }
+void I__OSAtomicAdd32Barrier(CPU *c) { add32(c); }
+void I__OSAtomicIncrement32(CPU *c) { RET(ARG(0) ? __atomic_add_fetch(A32(ARG(0)), 1, __ATOMIC_SEQ_CST) : 0); }
+void I__OSAtomicIncrement32Barrier(CPU *c) { I__OSAtomicIncrement32(c); }
+void I__OSAtomicDecrement32(CPU *c) { RET(ARG(0) ? __atomic_sub_fetch(A32(ARG(0)), 1, __ATOMIC_SEQ_CST) : 0); }
+void I__OSAtomicDecrement32Barrier(CPU *c) { I__OSAtomicDecrement32(c); }
+// int64_t OSAtomicAdd64[Barrier](amount (two words), address)
+static void add64(CPU *c) { RET64(ARG(2) ? __atomic_add_fetch((uint64_t *)G2H(ARG(2)), ARG64(0), __ATOMIC_SEQ_CST) : 0); }
+void I__OSAtomicAdd64(CPU *c) { add64(c); }
+void I__OSAtomicAdd64Barrier(CPU *c) { add64(c); }
+// OSSpinLock: a word, 0 when free
+void I__OSSpinLockLock(CPU *c) {
+    uint32_t *l = A32(ARG(0));
+    for (unsigned n = 0;; n++) {
+        uint32_t free_ = 0;
+        if (__atomic_compare_exchange_n(l, &free_, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) break;
+        if (n > 100) sched_yield();
+    }
+    RET(0);
+}
+void I__OSSpinLockTry(CPU *c) { uint32_t free_ = 0; RET(__atomic_compare_exchange_n(A32(ARG(0)), &free_, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)); }
+void I__OSSpinLockUnlock(CPU *c) { __atomic_store_n(A32(ARG(0)), 0, __ATOMIC_SEQ_CST); RET(0); }
+void I__spin_lock(CPU *c) { I__OSSpinLockLock(c); }
+void I__spin_lock_try(CPU *c) { I__OSSpinLockTry(c); }
+void I__spin_unlock(CPU *c) { I__OSSpinLockUnlock(c); }
+void I__OSMemoryBarrier(CPU *c) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }

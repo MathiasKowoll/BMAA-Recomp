@@ -4,6 +4,7 @@
 // engine's loading time: 40 million mach_absolute_time and 20 million tolower in three minutes.
 //
 // Nothing here touches the bridge's state (handles, files, the guest heap), so no lock is needed.
+#include <stdlib.h>
 #include "rt.h"
 #include <ctype.h>
 #include <mach/mach_time.h>
@@ -111,4 +112,16 @@ void I__task_info(CPU *c) {
     kern_return_t k = task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &n);
     if (!k) { memcpy(G2H(ARG(2)), &info, n * sizeof(natural_t)); wr32(ARG(3), n); }
     c->eax = (uint32_t)k;
+}
+
+// BMAA_NCPU=n: the number of processors the game is told (hw.ncpu, hw.logicalcpu_max, hw.physicalcpu_max), for telling
+// a fault of the game's own threads working together from one of a single thread's arithmetic.
+void I__sysctlbyname(CPU *c) {   // (name, old, oldlen, new, newlen)
+    static int n = -1; if (n < 0) n = getenv("BMAA_NCPU") ? atoi(getenv("BMAA_NCPU")) : 0;
+    const char *name = ARG(0) ? (const char *)G2H(ARG(0)) : "";
+    if (n > 0 && ARG(1) && ARG(2) && rd32(ARG(2)) >= 4 &&
+        (!strcmp(name, "hw.ncpu") || !strcmp(name, "hw.logicalcpu_max") || !strcmp(name, "hw.physicalcpu_max"))) {
+        wr32(ARG(1), (uint32_t)n); wr32(ARG(2), 4); c->eax = 0; return;
+    }
+    unimpl_import(c, "_sysctlbyname");
 }
