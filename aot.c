@@ -341,6 +341,35 @@ static void import(CPU *c, uint32_t thunk) {
 }
 
 // Control goes to guest address t with the return address on the stack; when this returns, the address is popped.
+// Thread-local variables (`__thread`). The compiler reaches one through its descriptor: three words (a function,
+// a key, an offset), with the descriptor's address in eax and `call [eax]`; the function, dyld's __tlv_bootstrap
+// until first use, answers the variable's address in eax and keeps every other register. Here each thread gets its
+// own copy of the image's thread-local sections (initial values, then the zero-filled part) in guest memory.
+uint32_t aot_malloc(uint32_t n);
+static _Thread_local uint32_t tlv_block;
+static int tlv_get(CPU *c, uint32_t t) {
+    static int is_tlv = -1; static uint32_t tlv_marker, tmpl, tmpl_size, data_size;
+    extern dr_objc *dr_objc_actual(void);
+    if (is_tlv < 0) {
+        const dr_image *img = dr_objc_actual()->img;
+        const char *n = dr_macho32_unresolved_name(img, t);
+        if (!n || strcmp(n, "__tlv_bootstrap")) return 0;
+        const dr_section *d = dr_macho32_section(img, "__DATA", "__thread_data"), *z = dr_macho32_section(img, "__DATA", "__thread_bss");
+        tmpl = d ? d->addr : z ? z->addr : 0;
+        data_size = d ? d->size : 0;
+        tmpl_size = z ? z->addr + z->size - tmpl : data_size;
+        tlv_marker = t; is_tlv = tmpl_size != 0;
+    }
+    if (!is_tlv || t != tlv_marker) return 0;
+    if (!tlv_block) {
+        tlv_block = aot_malloc(tmpl_size);
+        memset(G2H(tlv_block), 0, tmpl_size);
+        if (data_size) memcpy(G2H(tlv_block), G2H(tmpl), data_size);
+    }
+    c->eax = tlv_block + rd32(c->eax + 8);
+    c->esp += 4;   // the return address the caller pushed
+    return 1;
+}
 // Native functions the guest can call through a pointer (what dlsym hands it for a library answered natively):
 // addresses in a range of their own, each with a word of context.
 #define HOSTFN_BASE 0xFD000000u
@@ -383,9 +412,19 @@ static void enter(CPU *c, uint32_t t) {
     if (t < D->null_floor) {
         fprintf(stderr, "  [aot] call through a null pointer (0x%x), at %08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x\n",
                 t, rd32(c->esp), rt_func_name(rd32(c->esp)), c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi);
+        {   // the frames above and the arguments this function was given: a null object is often an argument's doing
+            uint32_t ebp = c->ebp;
+            fprintf(stderr, "  [aot]   args %08x %08x %08x %08x %08x; frames:", rd32(ebp + 8), rd32(ebp + 12), rd32(ebp + 16), rd32(ebp + 20), rd32(ebp + 24));
+            for (int k = 0; k < 12 && ebp > 0x10000 && ebp < 0xA0000000u; k++) {
+                fprintf(stderr, " %08x(%s)", rd32(ebp + 4), rt_func_name(rd32(ebp + 4)));
+                ebp = rd32(ebp);
+            }
+            fprintf(stderr, "\n");
+        }
         show_last();
         stop(DR_ERR_NULLCALL);
     }
+    if (t >= DR_UNRESOLVED_BASE && tlv_get(c, t)) return;
     fprintf(stderr, "  [aot] call to 0x%08x, which is no function of the translation (from %s)\n", t, rt_func_name(c->fn));
     {   // who made the call (the return address it pushed) and the frames above, and the registers it had
         char b[600]; int n = snprintf(b, sizeof b, "  [aot]   called at %08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x; frames:",
@@ -823,8 +862,20 @@ static void prof_add(int t, uint32_t fn) {
 }
 static void *prof_thread(void *arg) {
     (void)arg;
+    // DR_PROFILE_STACK=t: every two seconds, the frames of guest thread t (read while it runs: a sample, not a fact)
+    int st = getenv("DR_PROFILE_STACK") ? atoi(getenv("DR_PROFILE_STACK")) : -1, tick = 0, shown = 0;
     for (;;) {
         usleep(1000);
+        if (st >= 0 && st < nprof_cpus && prof_cpus[st] && ++tick % 2000 == 0 && shown < 60) {
+            CPU *c = prof_cpus[st]; uint32_t ebp = c->ebp; char b[700]; int n = 0;
+            n += snprintf(b + n, sizeof b - n, "  [stack %d] in %s%s%s:", st, rt_func_name(c->fn), prof_in[st] ? " import " : "", prof_in[st] ? prof_in[st] : "");
+            for (int k = 0; k < 14 && n < 640 && ebp > 0x10000 && ebp < 0xA0000000u; k++) {
+                uint32_t ra = rd32(ebp + 4);
+                n += snprintf(b + n, sizeof b - n, " %08x", ra);
+                uint32_t next = rd32(ebp); if (next <= ebp) break; ebp = next;
+            }
+            fprintf(stderr, "%s\n", b); shown++;
+        }
         for (int t = 0; t < nprof_cpus; t++) {
             if (!prof_cpus[t] || !prof_cpus[t]->fn) continue;
             prof_add(t, prof_cpus[t]->fn);

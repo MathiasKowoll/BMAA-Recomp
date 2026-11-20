@@ -12,6 +12,7 @@ if [ -n "$SHOT_USR2" ] && pgrep -x dr-bmaa >/dev/null; then kill -USR2 "$(pgrep 
 # SHOT_AGAIN=n: n seconds later, capture every window once more (to see what came after, e.g. after PLAY)
 if [ -n "$SHOT_AGAIN" ]; then
     /usr/bin/python3 -c "import time; time.sleep($SHOT_AGAIN)"
+    if [ -n "$SHOT_USR2" ] && pgrep -x dr-bmaa >/dev/null; then kill -USR2 "$(pgrep -x dr-bmaa)"; /usr/bin/python3 -c "import time; time.sleep(3)"; fi
     ./build/wins 2>/dev/null > build/shots/wins2.txt
     i=0
     while read -r id rest; do i=$((i+1)); screencapture -x -o -l "$id" "build/shots/later$i.png" 2>/dev/null; done < build/shots/wins2.txt

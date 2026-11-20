@@ -64,7 +64,8 @@ void dbg_init(void) {
                     @"Array.prototype.slice.call(document.body.children).map(function(e){var s=getComputedStyle(e);return e.tagName+'#'+e.id+'.'+e.className+' '+e.offsetWidth+'x'+e.offsetHeight+' disp='+s.display+' vis='+s.visibility+' op='+s.opacity}).join(' | ')",
                 };
                 // DBG_JS: something to run in the page first (to look past an animation a locked screen holds still)
-                if (getenv("DBG_JS"))
+                static int js_done;   // the script once: a later report must not press the button again
+                if (getenv("DBG_JS") && !js_done++)
                     fprintf(stderr, "  [page] DBG_JS => %s\n",
                             [[(id)v performSelector:@selector(stringByEvaluatingJavaScriptFromString:)
                                          withObject:[NSString stringWithUTF8String:getenv("DBG_JS")]] description].UTF8String);

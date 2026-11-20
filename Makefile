@@ -60,7 +60,7 @@ $(BUILD)/dr/x86.o: $(DR)/src/x86.c $(DR_HDR)
 	$(CC) $(DR_FLAGS) -c $< -o $@
 $(BUILD)/dr-interp: $(DR_OBJ) $(BUILD)/dr/x86.o $(BUILD)/dr/trace.o
 	$(CC) -arch arm64 $^ -lobjc -framework Foundation -framework AppKit -framework Metal -framework QuartzCore \
-	    -framework ImageIO -framework CoreGraphics -framework CoreText -o $@
+	    -framework ImageIO -framework CoreGraphics -framework CoreText -framework OpenGL -framework Carbon -o $@
 interp: $(BUILD)/dr-interp
 $(BUILD)/dr/aot.o: aot.c $(M32_HDR) $(DR_HDR)
 	@mkdir -p $(dir $@)
@@ -82,15 +82,29 @@ $(BUILD)/dr/ct.o: ct.c $(M32_HDR) $(DR_HDR)
 $(BUILD)/dr/eh.o: $(M32)/runtime/eh.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c $(M32)/runtime/eh.c -o $@
+$(BUILD)/dr/input.o: input.c $(M32_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -I$(M32)/runtime -c input.c -o $@
+$(BUILD)/dr/display.o: display.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -I$(DR_INC) -I$(M32)/runtime -c display.c -o $@
+$(BUILD)/dr/glx.o: glx.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -Wno-\#warnings -I$(DR_INC) -I$(M32)/runtime -c glx.c -o $@
+$(BUILD)/dr/gl_gen.c: $(M32)/tools/glgen.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) $(M32)/tools/glgen.py $@
+$(BUILD)/dr/gl_gen.o: $(BUILD)/dr/gl_gen.c $(M32_HDR)
+	$(CC) -O2 -g -arch arm64 -Wno-deprecated-declarations -Wno-\#warnings -I$(M32)/runtime -c $(BUILD)/dr/gl_gen.c -o $@
 $(BUILD)/dr/fast.o: fast.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c fast.c -o $@
 $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
-BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o
+BMAA_OBJ = $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/input.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
 	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
-	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -o $@
+	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework OpenGL -framework Carbon -o $@
 dr: $(BUILD)/dr-bmaa
 .PHONY: dr interp

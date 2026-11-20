@@ -141,3 +141,18 @@ void I__CFUUIDGetUUIDBytes(CPU *c) {
     memcpy(G2H(out), &b, 16);
     RET(out); c->esp += 4;
 }
+
+// ---- CoreFoundation calls the bridge's generic route cannot take (a struct argument, a pointer to fill) ----
+// (CFMutableStringRef, find, replace, CFRange by value: two slots, options) -> how many replaced
+void I__CFStringFindAndReplace(CPU *c) {
+    CFMutableStringRef s = host(ARG(0)); CFStringRef f = host(ARG(1)), r = host(ARG(2));
+    if (!s || !f || !r) { c->eax = 0; return; }
+    c->eax = (uint32_t)CFStringFindAndReplace(s, f, r, CFRangeMake((int32_t)ARG(3), (int32_t)ARG(4)), ARG(5));
+}
+// (allocator, CFDataRef xml, options, CFStringRef *error) -> the property list
+void I__CFPropertyListCreateFromXMLData(CPU *c) {
+    CFDataRef d = host(ARG(1));
+    CFPropertyListRef p = d ? CFPropertyListCreateWithData(NULL, d, ARG(2), NULL, NULL) : NULL;
+    if (ARG(3)) wr32(ARG(3), 0);
+    c->eax = handle(p);
+}

@@ -38,3 +38,38 @@ void I__wcscmp(CPU *c) {
     }
 }
 void I__wcslen(CPU *c) { uint32_t a = ARG(0), n = 0; while (rd32(a + 4 * n)) n++; RET(n); }
+
+// vswscanf(text, format, va_list): the wide characters are the host's size and so are int, float and double; what
+// differs is that each output is a 32-bit pointer on the game's stack and that its `long` is four bytes. So the
+// format goes to the host's own with the `l` taken off the integer conversions and the pointers translated.
+#include <wchar.h>
+void I__vswscanf(CPU *c) {
+    const wchar_t *text = (const wchar_t *)G2H(ARG(0)), *f = (const wchar_t *)G2H(ARG(1));
+    uint32_t ap = ARG(2);
+    wchar_t fmt[512]; int n = 0, nout = 0; void *out[16] = {0};
+    for (; *f && n < 500; f++) {
+        fmt[n++] = *f;
+        if (*f != L'%') continue;
+        if (f[1] == L'%') { fmt[n++] = *++f; continue; }
+        int skip = 0, lpos = -1;
+        for (f++; *f && n < 500; f++) {
+            if (*f == L'*') skip = 1;
+            if (*f == L'l' || *f == L'q') { if (lpos < 0) lpos = n; }
+            fmt[n++] = *f;
+            if (*f == L'[') { for (f++; *f && n < 500; f++) { fmt[n++] = *f; if (*f == L']' && f[-1] != L'[' ) break; } break; }
+            if (wcschr(L"diouxXncsCSeEfgGaAp", *f)) {
+                // the game's long is an int: one `l` comes off an integer conversion (two stay: long long is 8 in both)
+                if (lpos >= 0 && wcschr(L"diouxXn", *f) && !(lpos + 1 < n - 1 && fmt[lpos + 1] == L'l')) {
+                    for (int k = lpos; k < n - 1; k++) fmt[k] = fmt[k + 1];
+                    n--;
+                }
+                break;
+            }
+        }
+        if (!*f) break;
+        if (!skip && nout < 16) { uint32_t g = rd32(ap + 4u * (uint32_t)nout); out[nout++] = g ? G2H(g) : NULL; }
+    }
+    fmt[n] = 0;
+    c->eax = (uint32_t)swscanf(text, fmt, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10],
+                               out[11], out[12], out[13], out[14], out[15]);
+}
