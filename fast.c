@@ -125,3 +125,43 @@ void I__sysctlbyname(CPU *c) {   // (name, old, oldlen, new, newlen)
     }
     unimpl_import(c, "_sysctlbyname");
 }
+
+// ---- The calls the game makes millions of times while it plays ----
+// A run of four and a half minutes made 155 million calls out of the game, and 220 seconds went inside them: the
+// general way finds each by comparing names and holds the runtime's one lock meanwhile, about a microsecond a call,
+// and the rendering thread stood waiting for that lock. These are the ones at the top of that list, answered here
+// directly: the allocator (19 million pairs of posix_memalign and free), bzero, the float tests and the maths
+// functions, and the two clock calls the sound library asks 35 thousand times a second.
+#include <math.h>
+#include <strings.h>
+uint32_t aot_malloc(uint32_t n); void aot_free(uint32_t p); uint32_t aot_block_size(uint32_t p);
+void fast_free(CPU *c) { if (ARG(0)) aot_free(ARG(0)); c->eax = 0; }   // I__free and I__posix_memalign are heapdbg.c's
+void fast_posix_memalign(CPU *c) {   // (void **out, alignment, size): the heap's blocks are aligned already
+    uint32_t p = aot_malloc(ARG(2));
+    if (ARG(0)) wr32(ARG(0), p);
+    c->eax = p ? 0 : 12;
+}
+void I__malloc_size(CPU *c) { c->eax = ARG(0) ? aot_block_size(ARG(0)) : 0; }
+void I____bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
+void I__bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
+void I____isnanf(CPU *c) { c->eax = isnan(ARGF(0)) != 0; }
+void I____isinff(CPU *c) { c->eax = isinf(ARGF(0)) != 0; }
+void I__cosf(CPU *c) { FPUSH((double)cosf(ARGF(0))); }
+void I__sinf(CPU *c) { FPUSH((double)sinf(ARGF(0))); }
+void I__acosf(CPU *c) { FPUSH((double)acosf(ARGF(0))); }
+void I__fmodf(CPU *c) { FPUSH((double)fmodf(ARGF(0), ARGF(1))); }
+void I__powf(CPU *c) { FPUSH((double)powf(ARGF(0), ARGF(1))); }
+void I____umoddi3(CPU *c) {
+    uint64_t a = (uint64_t)ARG(0) | (uint64_t)ARG(1) << 32, b = (uint64_t)ARG(2) | (uint64_t)ARG(3) << 32;
+    uint64_t r = b ? a % b : 0;
+    c->eax = (uint32_t)r; c->edx = (uint32_t)(r >> 32);
+}
+void I__strcasecmp(CPU *c) { c->eax = (uint32_t)strcasecmp((const char *)G2H(ARG(0)), (const char *)G2H(ARG(1))); }
+// UpTime(): an AbsoluteTime, here nanoseconds (as mach_absolute_time above, with its 1/1 time base);
+// AbsoluteToDuration(AbsoluteTime): milliseconds when it reaches one, else minus the microseconds
+void I__UpTime(CPU *c) { uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); c->eax = (uint32_t)t; c->edx = (uint32_t)(t >> 32); }
+void I__AbsoluteToDuration(CPU *c) {
+    uint64_t ns = (uint64_t)ARG(0) | (uint64_t)ARG(1) << 32;
+    c->eax = ns >= 1000000ull ? (uint32_t)(int32_t)(ns / 1000000ull) : (uint32_t)(int32_t)(-(int64_t)(ns / 1000ull));
+}
+void I__AbsoluteToNanoseconds(CPU *c) { c->eax = ARG(0); c->edx = ARG(1); }

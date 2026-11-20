@@ -1,7 +1,7 @@
 // DR_HEAP_WHO=1: who holds the game's memory. One allocation in 16 made with posix_memalign is remembered with the
 // code that asked for it (six frames up); a free forgets it. When the run is stopped, the callers with the most
 // remembered allocations still alive are printed, by frame depth: a leak shows as one caller far above the rest.
-// Without the variable both calls go straight on to the bridge.
+// Without the variable both calls go straight on to the heap (fast.c).
 #include "rt.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -9,6 +9,7 @@
 #include <string.h>
 
 void unimpl_import(CPU *c, const char *name);
+void fast_free(CPU *c); void fast_posix_memalign(CPU *c);   // fast.c: straight to the heap, not through the bridge
 const char *rt_func_name(uint32_t a);
 #define SLOTS (1u << 21)
 #define DEPTH 6
@@ -22,7 +23,7 @@ static int enabled(void) {
 }
 void I__posix_memalign(CPU *c) {
     uint32_t out = ARG(0), size = ARG(2), ebp = c->ebp, ra0 = rd32(c->esp);
-    unimpl_import(c, "_posix_memalign");
+    fast_posix_memalign(c);
     if (!enabled() || c->eax || !out) return;
     uint32_t p = rd32(out);
     pthread_mutex_lock(&mx);
@@ -52,7 +53,7 @@ void I__free(CPU *c) {
         }
         pthread_mutex_unlock(&mx);
     }
-    unimpl_import(c, "_free");
+    fast_free(c);
 }
 void heapdbg_report(void) {
     if (on != 1) return;

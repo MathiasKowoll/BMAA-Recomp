@@ -206,7 +206,9 @@ static int lock_stats = -1;
 static void big_lock(void) {
     pthread_once(&big_once, big_make);
     if (lock_stats < 0) lock_stats = getenv("DR_LOCK_STATS") != NULL;
-    if (lock_stats && big_depth == 0 && pthread_mutex_trylock(&big) != 0) {
+    // (with statistics: a try that succeeds HAS taken the lock; taking it again below left it held for ever)
+    if (lock_stats && big_depth == 0 && pthread_mutex_trylock(&big) == 0) { big_depth++; return; }
+    if (lock_stats && big_depth == 0) {
         const char *what = big_holder_what;
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         pthread_mutex_lock(&big);
@@ -1007,6 +1009,7 @@ uint32_t aot_stack_hi(void) { return Gt ? G.stack_hi : 0; }
 // For threads.c: memory of the guest's, taken under the bridge's lock.
 uint32_t aot_malloc(uint32_t n) { big_lock(); uint32_t p = dr_guest_malloc(main_cpu->g, n); big_unlock(); return p; }
 void aot_free(uint32_t p) { big_lock(); dr_guest_free(main_cpu->g, p); big_unlock(); }
+uint32_t aot_block_size(uint32_t p) { big_lock(); uint32_t n = dr_guest_block_size(main_cpu->g, p); big_unlock(); return n; }
 
 // The interpreter skips a function by address as it is entered. Translated callers call it by name, so a function
 // to neutralise is listed in hle.txt instead and answered by an H_ function of the project (see game.c).

@@ -7,6 +7,7 @@
 #include "dr_bridge.h"
 #include "dr_objc.h"
 #include "rt.h"
+#include <stdatomic.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
@@ -27,9 +28,23 @@ dr_objc *dr_objc_actual(void);
 #define RET(v) (c->eax = (uint32_t)(v))
 #define P(g) ((g) ? G2H(g) : NULL)
 
+// A handle always stands for the same host object, and the game asks for its few GL contexts thousands of times a
+// frame (it locks and unlocks its context around every batch): the ones seen are kept, so that looking one up does
+// not take the runtime's one lock, which the rendering thread was spending a third of its time waiting for.
 static void *host(uint32_t v) {
     if (!v) return NULL;
+    static struct { uint32_t v; void *h; } seen[16];
+    for (int i = 0; i < 16; i++) {
+        uint32_t k = __atomic_load_n(&seen[i].v, __ATOMIC_SEQ_CST);
+        if (k == v) { void *h = __atomic_load_n(&seen[i].h, __ATOMIC_SEQ_CST); if (h) return h; }
+        if (!k) break;
+    }
     aot_lock(); void *h = dr_objc_object_for(dr_objc_actual(), v); aot_unlock();
+    if (h) for (int i = 0; i < 16; i++) {
+        uint32_t none = 0;
+        if (__atomic_compare_exchange_n(&seen[i].v, &none, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) { __atomic_store_n(&seen[i].h, h, __ATOMIC_SEQ_CST); break; }
+        if (none == v) break;
+    }
     return h;
 }
 static uint32_t handle(const void *h) {
