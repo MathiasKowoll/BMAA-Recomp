@@ -35,6 +35,7 @@ static uint32_t handle(const void *h) {
     aot_lock(); uint32_t v = dr_objc_handle_for(dr_objc_actual(), (void *)h); aot_unlock();
     return v;
 }
+#define PAD_NUM 0x4D554E50u   /* marks a number of ours in the game's memory */
 static int off(void) { static int v = -1; if (v < 0) v = getenv("BMAA_NO_PADS") != NULL; return v; }
 static int tracing(void) { static int v = -1; if (v < 0) v = getenv("BMAA_TRACE_PAD") != NULL; return v; }
 
@@ -82,11 +83,44 @@ static void pad_setup(struct pad *p, int slot) {
     for (int e = 0; e < NELEM; e++) p->last[e] = 0;
 }
 static int32_t stick(float v) { int32_t r = (int32_t)(v * 32767.0f); return r < -32768 ? -32768 : r > 32767 ? 32767 : r; }
+// For testing with nobody at the pad (BMAA_PAD_FILE=path): a line "element value milliseconds" written to that file
+// holds that element of every connected pad at that value for that long; the file is removed once read.
+static int inj_elem = -1; static int32_t inj_value; static uint64_t inj_until;
+static void inject_poll(void) {
+    static const char *path; static int asked;
+    if (!asked) { asked = 1; path = getenv("BMAA_PAD_FILE"); }
+    if (!path) return;
+    FILE *f = fopen(path, "r"); if (!f) return;
+    int e = -1, v = 0, ms = 0;
+    if (fscanf(f, "%d %d %d", &e, &v, &ms) == 3 && e >= 0 && e < NELEM) {
+        inj_elem = e; inj_value = v; inj_until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + (uint64_t)ms * 1000000u;
+        fprintf(stderr, "  [pad] test: element %d held at %d for %d ms\n", e, v, ms);
+        // what the game holds about its pads at this moment (its manager object is the callbacks' context)
+        uint32_t m = cb_value[1];
+        fprintf(stderr, "  [pad] test: the game's input-off flag is %u\n", rd32(0x37c3a9c) & 255);
+        for (int i = 0; m && i < 32; i++) {
+            uint32_t d = rd32(m + 0x84 + 4 * i); if (!d) continue;
+            fprintf(stderr, "  [pad] test: game slot %d: device 0x%x id 0x%x connected %u, %u configuration(s)\n",
+                    i, rd32(d), rd32(d + 0xc), rd32(d + 0x70) & 255, rd32(d + 0xb0));
+            uint32_t n = rd32(d + 0xa8);                       // the leftmost node of its map of configurations
+            if (rd32(d + 0xb0) && n > 0x1000) {
+                fprintf(stderr, "  [pad] test:   first node:");
+                for (int k = 4; k < 30; k++) fprintf(stderr, " %x", rd32(n + 4 * k));
+                fputc('\n', stderr);
+            }
+        }
+    }
+    fclose(f); remove(path);
+}
+static void inject(int32_t now[NELEM]) {
+    if (inj_elem >= 0 && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < inj_until) now[inj_elem] = inj_value;
+}
 static void pad_read(struct pad *p, int32_t now[NELEM]) {
     static int y_up = -1; if (y_up < 0) y_up = getenv("BMAA_PAD_Y_UP") != NULL;
+    memset(now, 0, NELEM * sizeof now[0]);
+    if (p->gc == (void *)kCFNull) { inject(now); return; }   // the test pad: nobody holds it
     GCController *gc = (__bridge GCController *)p->gc;
     GCExtendedGamepad *g = gc.extendedGamepad;
-    memset(now, 0, NELEM * sizeof now[0]);
     if (!g) return;
     now[0] = g.buttonA.pressed; now[1] = g.buttonB.pressed; now[2] = g.buttonX.pressed; now[3] = g.buttonY.pressed;
     now[4] = g.leftShoulder.pressed; now[5] = g.rightShoulder.pressed;
@@ -98,6 +132,7 @@ static void pad_read(struct pad *p, int32_t now[NELEM]) {
     now[17] = (int32_t)(g.leftTrigger.value * 255.0f + 0.5f);
     now[18] = stick(g.rightThumbstick.xAxis.value); now[19] = stick(y_up ? ry : -ry);
     now[20] = (int32_t)(g.rightTrigger.value * 255.0f + 0.5f);
+    inject(now);
 }
 static void call4(const uint32_t cb[2], uint32_t what) {
     if (!cb[0]) return;
@@ -109,9 +144,14 @@ static void pads_scan(unsigned *came, unsigned *went) {
     *came = *went = 0;
     NSArray<GCController *> *all = [GCController controllers];
     for (int s = 0; s < NPAD; s++) {
-        if (!pads[s].gc) continue;
+        if (!pads[s].gc || pads[s].gc == (void *)kCFNull) continue;
         GCController *gc = (__bridge GCController *)pads[s].gc;
         if ([all indexOfObjectIdenticalTo:gc] == NSNotFound) { CFRelease(pads[s].gc); pads[s].gc = NULL; *went |= 1u << s; }
+    }
+    // with BMAA_PAD_FILE, a pad nobody holds sits in the last slot, so the game can be driven with no controller here
+    if (getenv("BMAA_PAD_FILE") && !pads[NPAD - 1].gc) {
+        pads[NPAD - 1].gc = (void *)kCFNull; pad_setup(&pads[NPAD - 1], NPAD - 1); *came |= 1u << (NPAD - 1);
+        fprintf(stderr, "  [pad] test pad in slot %d\n", NPAD);
     }
     for (GCController *gc in all) {
         if (!gc.extendedGamepad) continue;
@@ -145,17 +185,12 @@ void I__IOHIDManagerScheduleWithRunLoop(CPU *c) {
 void I__IOHIDManagerUnscheduleFromRunLoop(CPU *c) { if (off()) unimpl_import(c, "_IOHIDManagerUnscheduleFromRunLoop"); }
 void I__IOHIDManagerOpen(CPU *c) { if (off()) { unimpl_import(c, "_IOHIDManagerOpen"); return; } RET(0); }
 void I__IOHIDManagerClose(CPU *c) { if (off()) { unimpl_import(c, "_IOHIDManagerClose"); return; } stop = 1; RET(0); }
-// the pads there are at this moment, as a set the game releases; none: no set
+// The pads there are at this moment: always "none" (no set, as IOKit answers then). Every pad is announced through
+// the matching callback from the loop instead, the one way seen to work: a pad handed over in this set was never
+// asked for its properties by the game.
 void I__IOHIDManagerCopyDevices(CPU *c) {
     if (off()) { unimpl_import(c, "_IOHIDManagerCopyDevices"); return; }
-    unsigned came, went; pads_scan(&came, &went);
-    CFMutableSetRef set = NULL;
-    for (int s = 0; s < NPAD; s++) {
-        if (!pads[s].gc) continue;
-        if (!set) set = CFSetCreateMutable(NULL, 0, &kCFTypeSetCallBacks);
-        CFSetAddValue(set, pads[s].dev);
-    }
-    RET(handle(set));
+    RET(0);
 }
 // The set's values as the game's handles. (The bridge hands a host pointer through untouched here.)
 void I__CFSetGetValues(CPU *c) {
@@ -182,8 +217,30 @@ void I__IOHIDDeviceGetProperty(CPU *c) {
         const void *v = ks ? CFDictionaryGetValue(pads[s].props, ks) : NULL;
         if (ks) CFRelease(ks);
         if (tracing()) fprintf(stderr, "  [pad] the game asks pad %d for \"%s\": %s\n", s + 1, key, v ? "answered" : "nothing");
-        RET(handle(v));
+        // A number goes out as a word pair of the game's memory that only the two shims below read. As a handle it
+        // did not come back: small CFNumbers are tagged pointers, and the game then read vendor and product as
+        // nothing ("CFGetTypeID with a NULL object") and never took the pad.
+        if (v && CFGetTypeID(v) == CFNumberGetTypeID()) {
+            int32_t n = 0; CFNumberGetValue(v, kCFNumberSInt32Type, &n);
+            uint32_t w = aot_malloc(8); wr32(w, PAD_NUM); wr32(w + 4, (uint32_t)n);   // a few per pad, never freed
+            RET(w);
+        } else RET(handle(v));
     }
+}
+static int pad_num(uint32_t v) { return v >= 0x1000 && v < DR_OBJC_HANDLE_BASE && !(v & 3) && rd32(v) == PAD_NUM; }
+void I__CFGetTypeID(CPU *c) {
+    if (pad_num(ARG(0))) { RET(CFNumberGetTypeID()); return; }
+    unimpl_import(c, "_CFGetTypeID");
+}
+// (number, type, value out)
+void I__CFNumberGetValue(CPU *c) {
+    if (!pad_num(ARG(0))) { unimpl_import(c, "_CFNumberGetValue"); return; }
+    uint32_t t = ARG(1), v = rd32(ARG(0) + 4), out = ARG(2);
+    if (t == 1 || t == 7) wr8(out, (uint8_t)v);
+    else if (t == 2 || t == 8) wr16(out, (uint16_t)v);
+    else if (t == 4 || t == 11) { wr32(out, v); wr32(out + 4, (int32_t)v < 0 ? 0xFFFFFFFFu : 0); }
+    else wr32(out, v);
+    RET(1);
 }
 
 // ---- elements and values: words of the game's memory, written by pad_setup and the loop below ----
@@ -201,6 +258,7 @@ void I__CFRunLoopRun(CPU *c) {
     fprintf(stderr, "  [pad] the game's gamepad thread is listening\n");
     for (unsigned tick = 0; !stop; tick++) {
         @autoreleasepool {
+            if (tick % 25 == 0) inject_poll();
             if (tick % 125 == 0) {               // twice a second: who came, who left
                 unsigned came, went; pads_scan(&came, &went);
                 for (int s = 0; s < NPAD; s++) {
@@ -247,4 +305,20 @@ void I__CFNumberCreate(CPU *c) {
     default: fprintf(stderr, "  [cf] CFNumberCreate: type %u not known, refused\n", type);
     }
     RET(n ? handle(n) : 0);
+}
+
+// CFDictionaryGetKeysAndValues(dictionary, keys out, values out): the game lists a pad definition's entries with it
+// (Resources/InputDevices/*.plist), and the two arrays are the game's memory, which the general way does not write:
+// every pad then got a configuration with no controls in it, and no button did anything.
+void I__CFDictionaryGetKeysAndValues(CPU *c) {
+    CFDictionaryRef d = host(ARG(0));
+    if (!d) return;
+    CFIndex n = CFDictionaryGetCount(d);
+    const void **k = calloc((size_t)n + 1, sizeof *k), **v = calloc((size_t)n + 1, sizeof *v);
+    CFDictionaryGetKeysAndValues(d, k, v);
+    for (CFIndex i = 0; i < n; i++) {
+        if (ARG(1)) wr32(ARG(1) + 4 * (uint32_t)i, handle(k[i]));
+        if (ARG(2)) wr32(ARG(2) + 4 * (uint32_t)i, handle(v[i]));
+    }
+    free(k); free(v);
 }
