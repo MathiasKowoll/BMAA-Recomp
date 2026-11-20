@@ -696,7 +696,24 @@ void cpu_set_mxcsr(CPU *c, uint32_t v) {
     c->mxcsr = v;
     fesetround(mode[(v >> 13) & 3]);
 }
-void cpu_cpuid(CPU *c) { c->eax = 1; c->ebx = c->ecx = c->edx = 0; }
+// CPUID. It used to say "leaf 1, no features at all": to the game a processor with no SSE and no SSE2, on which it
+// takes whatever paths it keeps for such a machine. It is told what the translated code really offers: an Intel
+// processor of the game's time with SSE, SSE2, SSE3 and SSSE3 (the instruction sets the translator knows), CMOV,
+// CX8, FXSR and the time stamp counter; no MMX-only paths, no SSE4, no AVX, no hyper-threading leaf.
+// BMAA_CPUID_NONE=1 gives the old answer back, for comparing.
+void cpu_cpuid(CPU *c) {
+    static int none = -1; if (none < 0) none = getenv("BMAA_CPUID_NONE") != NULL;
+    uint32_t leaf = c->eax;
+    if (none) { c->eax = 1; c->ebx = c->ecx = c->edx = 0; return; }
+    c->eax = c->ebx = c->ecx = c->edx = 0;
+    if (leaf == 0) { c->eax = 1; c->ebx = 0x756e6547; c->edx = 0x49656e69; c->ecx = 0x6c65746e; }   // "GenuineIntel"
+    else if (leaf == 1) {
+        c->eax = 0x000206A7;                                   // family 6, a 2011 Core
+        c->ebx = 0x00010800;                                   // one logical processor per package, 64-byte lines
+        c->ecx = (1u << 0) | (1u << 9);                        // SSE3, SSSE3
+        c->edx = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 24) | (1u << 25) | (1u << 26);   // FPU TSC CX8 CMOV FXSR SSE SSE2
+    } else if (leaf == 0x80000000u) c->eax = 0x80000000u;      // no extended leaves
+}
 
 // ---- dr_x86.h ----
 #define MAGIC_RET 0xDEADC0DEu

@@ -254,8 +254,18 @@ void I__dispatch_group_async(CPU *c) {
 }
 void I__dispatch_group_wait(CPU *c) { RET(dispatch_group_wait((__bridge dispatch_group_t)obj(ARG(0)), ARG64(1)) ? 1 : 0); }
 void I__dispatch_semaphore_create(CPU *c) { RET(token((__bridge_retained void *)dispatch_semaphore_create((long)(int32_t)ARG(0)))); }
-void I__dispatch_semaphore_wait(CPU *c) { RET(dispatch_semaphore_wait((__bridge dispatch_semaphore_t)obj(ARG(0)), ARG64(1)) ? 1 : 0); }
-void I__dispatch_semaphore_signal(CPU *c) { RET(dispatch_semaphore_signal((__bridge dispatch_semaphore_t)obj(ARG(0))) ? 1 : 0); }
+// BMAA_NO_SUSPEND=1 (for testing while the Mac is used for something else): the game suspends itself when it stops
+// being the application in front, by taking a semaphore its main loop needs (sub_1bc51d0) and giving it back when
+// it comes forward again (sub_1bc52b0). With the variable those two do neither, and the game keeps running behind.
+static int no_suspend(void) { static int v = -1; if (v < 0) v = getenv("BMAA_NO_SUSPEND") != NULL; return v; }
+void I__dispatch_semaphore_wait(CPU *c) {
+    if (no_suspend() && rd32(c->esp) == 0x1bc5286u) { RET(0); return; }
+    RET(dispatch_semaphore_wait((__bridge dispatch_semaphore_t)obj(ARG(0)), ARG64(1)) ? 1 : 0);
+}
+void I__dispatch_semaphore_signal(CPU *c) {
+    if (no_suspend() && rd32(c->esp) == 0x1bc5365u) { RET(0); return; }
+    RET(dispatch_semaphore_signal((__bridge dispatch_semaphore_t)obj(ARG(0))) ? 1 : 0);
+}
 void I__dispatch_time(CPU *c) { RET64(dispatch_time(ARG64(0), (int64_t)ARG64(2))); }
 void I__dispatch_release(CPU *c) {}   // the host objects are kept: a handful, for as long as the game runs
 void I__dispatch_retain(CPU *c) {}
