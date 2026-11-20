@@ -20,3 +20,33 @@ static void stage_achievement_frame(CPU *c) {
     c->eax = 0;
 }
 void game_init(void) { aot_override(0x45320, stage_achievement_frame); }
+
+// sub_1c97620(CFSTR("X.framework"), CFBundleRef *out) -> 0 when it has the bundle: Feral's way to a system library's
+// functions by name. It walks there with FSFindFolder and FSRef URLs, which the bridge does not carry far enough,
+// and the engine uses it for `free` itself: every release of memory came here, failed, and released nothing.
+// Answered with the bundle of /System/Library/Frameworks/X.framework, as a handle; the functions are then found by
+// I__CFBundleGetFunctionPointerForName (aot.c).
+#include "dr_bridge.h"
+#include "dr_objc.h"
+#include <CoreFoundation/CoreFoundation.h>
+#include <string.h>
+void aot_lock(void);
+void aot_unlock(void);
+dr_objc *dr_objc_actual(void);
+void H_open_system_bundle(CPU *c) {
+    uint32_t s = ARG(0), out = ARG(1); char name[64] = "";
+    if (s && s < DR_OBJC_HANDLE_BASE) {   // a constant string of the game's: { isa, flags, bytes, length }
+        uint32_t bytes = rd32(s + 8), len = rd32(s + 12);
+        if (bytes && len < sizeof name) { memcpy(name, G2H(bytes), len); name[len] = 0; }
+    }
+    if (!name[0] || !out) { c->eax = (uint32_t)-1; return; }
+    // a new reference each time: the game releases the bundle once it has the function it wanted
+    char path[160]; snprintf(path, sizeof path, "/System/Library/Frameworks/%s", name);
+    CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), true);
+    CFBundleRef bundle = u ? CFBundleCreate(NULL, u) : NULL;
+    if (u) CFRelease(u);
+    aot_lock();
+    uint32_t h = bundle ? dr_objc_handle_for(dr_objc_actual(), (void *)bundle) : 0;
+    aot_unlock();
+    if (h) { wr32(out, h); c->eax = 0; } else c->eax = (uint32_t)-1;
+}

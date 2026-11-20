@@ -25,6 +25,7 @@
 // bridge to read arguments from), and threads.c answers what creates threads and what blocks. The bridge was not
 // written for two threads at once, so one lock wraps every call into it; it is let go while guest code runs
 // (a callback from the bridge) and while the bridge sits in a host call that may block (dr_host_call_enter).
+#include <CoreFoundation/CoreFoundation.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <execinfo.h>
@@ -248,8 +249,10 @@ static void import_report(void) {
     }
 }
 static void prof_report(void);
+void heapdbg_report(void);
 static void big_lock_report(void) {
     import_report();
+    heapdbg_report();
     prof_report();
     if (!lock_stats) return;
     fprintf(stderr, "  [lock] %.1f s waited for the bridge's lock in all; held by a thread in:\n", big_wait_total / 1e9);
@@ -438,6 +441,27 @@ static void enter(CPU *c, uint32_t t) {
     }
     if (t >= DR_UNRESOLVED_BASE) fprintf(stderr, "  [aot]   that is the marker of a data symbol nobody resolved\n");
     stop(DR_ERR_OPCODE);
+}
+// CFBundleGetFunctionPointerForName(bundle, CFSTR("name")): a system function looked up by name at run time. The
+// game does this for `free` itself (in System.framework), so with no answer nothing it allocated was ever released.
+// A function the game also imports the ordinary way has a stub, and the stub's address is a pointer the game can
+// call; anything else goes on to the bridge.
+void unimpl_import(CPU *c, const char *name);
+void I__CFBundleGetFunctionPointerForName(CPU *c) {
+    extern dr_objc *dr_objc_actual(void);
+    uint32_t s = ARG(1); char name[130] = "_";
+    if (s && s < DR_OBJC_HANDLE_BASE) {          // a constant string of the game's: { isa, flags, bytes, length }
+        uint32_t bytes = rd32(s + 8), len = rd32(s + 12);
+        if (bytes && len < 120) { memcpy(name + 1, G2H(bytes), len); name[1 + len] = 0; }
+    } else if (s) {
+        big_lock(); void *h = dr_objc_object_for(dr_objc_actual(), s); big_unlock();
+        if (h) CFStringGetCString((CFStringRef)h, name + 1, 120, kCFStringEncodingUTF8);
+    }
+    if (name[1])
+        for (int k = 0; k < ngstubs; k++)
+            if (!strcmp(gstubs[k].name, name)) { c->eax = gstubs[k].addr; return; }
+    fprintf(stderr, "  [aot] CFBundleGetFunctionPointerForName(\"%s\"): not a function the game imports; left to the bridge\n", name + 1);
+    unimpl_import(c, "_CFBundleGetFunctionPointerForName");
 }
 // DR_CALLSITE=addr: an indirect call that returns to that address is printed, with where it went, what it was
 // given and what it answered.

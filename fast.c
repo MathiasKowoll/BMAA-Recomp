@@ -78,3 +78,24 @@ void I__vswscanf(CPU *c) {
     c->eax = (uint32_t)swscanf(text, fmt, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10],
                                out[11], out[12], out[13], out[14], out[15]);
 }
+
+// The engine's "seconds since boot" (asked many times a frame): sysctl kern.boottime and gettimeofday. Both are
+// two 32-bit numbers in the game's layout; through the bridge they were 40% of the engine thread on the title screen.
+#include <sys/sysctl.h>
+#include <sys/time.h>
+void unimpl_import(CPU *c, const char *name);
+void I__sysctl(CPU *c) {   // (int *name, u_int namelen, void *old, size_t *oldlen, void *new, size_t newlen)
+    if (ARG(1) == 2 && rd32(ARG(0)) == CTL_KERN && rd32(ARG(0) + 4) == KERN_BOOTTIME && ARG(2) && ARG(3) && rd32(ARG(3)) >= 8 && !ARG(4)) {
+        static struct timeval boot;
+        if (!boot.tv_sec) { int mib[2] = { CTL_KERN, KERN_BOOTTIME }; size_t n = sizeof boot; sysctl(mib, 2, &boot, &n, NULL, 0); }
+        wr32(ARG(2), (uint32_t)boot.tv_sec); wr32(ARG(2) + 4, (uint32_t)boot.tv_usec); wr32(ARG(3), 8);
+        RET(0); return;
+    }
+    unimpl_import(c, "_sysctl");
+}
+void I__gettimeofday(CPU *c) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    if (ARG(0)) { wr32(ARG(0), (uint32_t)tv.tv_sec); wr32(ARG(0) + 4, (uint32_t)tv.tv_usec); }
+    if (ARG(1)) { wr32(ARG(1), 0); wr32(ARG(1) + 4, 0); }
+    RET(0);
+}

@@ -2,3 +2,4 @@
 # The two that DecompRecomp's reference invocation skips (--skip-func), see game.c.
 1c05da0 skip_1c05da0
 1b9b190 skip_1b9b190
+1c97620 open_system_bundle
