@@ -19,11 +19,29 @@ EXTRA_CFLAGS += -ffp-contract=off
 ifeq ($(TSO),1)
 EXTRA_CFLAGS += -DRT_TSO
 endif
-# The translated code is compiled -O2 (the framework's default is -O1): it is three quarters of the render thread's
-# time in play. `make OPT=-O1` for the old build.
-OPT ?= -O2
+# The translated code is compiled -O3 for Apple's processors (the framework's default is -O1): it is three quarters
+# of the render thread's time in play.
+OPT ?= -O3 -mcpu=apple-m1
 CFLAGS = $(OPT) -g -arch arm64 -mmacosx-version-min=$(MACOS_MIN) -Wno-unused-variable -Wno-unused-but-set-variable \
          -Wno-deprecated-declarations -I$(M32)/runtime -DRT_M_CONST $(EXTRA_CFLAGS)
+# Profile-guided build of the translated code. `make dr PGO=gen BUILD=build-pgo` builds an instrumented game; play it
+# with LLVM_PROFILE_FILE=pgo/bmaa-%p.profraw and stop it with kill -TERM (the profile is written then);
+# `xcrun llvm-profdata merge -o pgo/bmaa.profdata pgo/*.profraw`; from then on the ordinary build uses pgo/bmaa.profdata
+# when it is there (touch rt.h to rebuild everything with it). The profile is local, like everything made from the game.
+ifeq ($(PGO),gen)
+EXTRA_CFLAGS += -fprofile-instr-generate
+PGO_LD = -fprofile-instr-generate
+PGO_DEF = -DPGO_GEN
+else ifneq ($(wildcard pgo/bmaa.profdata),)
+EXTRA_CFLAGS += -fprofile-instr-use=$(CURDIR)/pgo/bmaa.profdata -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled
+endif
+# The translated code is built without the hook at every function's entry (rt.h, TRACE_FN): it cost 18% of the frame
+# rate in play. DR_WATCH, BMAA_INTERP, BMAA_SKIP and the like need it: `make dr TRACE=1 BUILD=build-trace` keeps a
+# second build with the hook, in its own folder.
+TRACE ?= 0
+ifeq ($(TRACE),0)
+EXTRA_CFLAGS += -DNO_TRACE
+endif
 include $(FW)/mac32/mac32.mk
 
 .venv:
@@ -77,7 +95,7 @@ $(BUILD)/dr-interp: $(DR_OBJ) $(BUILD)/dr/x86.o $(BUILD)/dr/trace.o
 interp: $(BUILD)/dr-interp
 $(BUILD)/dr/aot.o: aot.c $(M32_HDR) $(DR_HDR)
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(DR_INC) -I$(M32)/runtime -c aot.c -o $@
+	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter $(PGO_DEF) -I$(DR_INC) -I$(M32)/runtime -c aot.c -o $@
 $(BUILD)/dr/game.o: game.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(DR_INC) -I$(M32)/runtime -c game.c -o $@
@@ -139,7 +157,7 @@ $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
 BMAA_OBJ = $(BUILD)/dr/interp.o $(BUILD)/dr/bink.o $(BUILD)/dr/fps.o $(BUILD)/dr/au.o $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/al.o $(BUILD)/dr/pad.o $(BUILD)/dr/input.o $(BUILD)/dr/heapdbg.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
-	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
+	$(CC) -arch arm64 $(PGO_LD) $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
 	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework OpenGL -framework OpenAL -framework AudioToolbox -framework CoreAudio -framework GameController $(FF_LIBS) -framework Carbon -o $@
 dr: $(BUILD)/dr-bmaa
 .PHONY: dr interp

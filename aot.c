@@ -84,8 +84,14 @@ static int prof_index(CPU *c);
 static const char *volatile prof_in[64];
 static void import_stat(const char *name, uint64_t ns);
 static void on_usr1(int sig);
+#ifdef PGO_GEN
+extern int __llvm_profile_write_file(void);   // an instrumented build (make PGO=gen) writes its profile when stopped
+#endif
 static void on_term(int sig) {
     (void)sig;
+#ifdef PGO_GEN
+    signal(SIGALRM, SIG_DFL); alarm(60); __llvm_profile_write_file(); fprintf(stderr, "  [aot] the execution profile is written\n");
+#endif
     extern void dr_bridge_report_unimplemented(uint32_t top);
     signal(SIGALRM, SIG_DFL); alarm(2);   // the report prints from a signal handler: if another thread holds stdout, die anyway
     dr_bridge_report_unimplemented(80);
@@ -420,7 +426,7 @@ static _Thread_local sigjmp_buf *leave;  // the innermost run of this thread
 static _Thread_local dr_status leave_with;
 #define D Dt
 #define G (*Gt)
-static uint64_t nimports, ncalls_ind;
+static _Thread_local uint64_t nimports, ncalls_ind;   // per thread: one counter written by every thread was a shared cache line in the hottest paths
 CPU *cpu_new(uint32_t stack_size);
 void aot_thread_begin(CPU *c);
 
@@ -651,7 +657,21 @@ static int noverrides;
 void aot_override(uint32_t addr, void (*fn)(CPU *)) { if (noverrides < 16) { overrides[noverrides].addr = addr; overrides[noverrides++].fn = fn; } }
 void game_init(void) __attribute__((weak));
 
+// The plain case of an indirect call, a translated function that nothing overrides, remembered by enter() so that
+// call_ind can go straight to it.
+static uint64_t ci_recent[4096];
 static int stub_of_thunk(uint32_t t);
+static uint16_t *stub_slot; static uint32_t stub_mask;
+static void stub_table_build(void) {
+    uint32_t n = 16; while (n < (uint32_t)ngstubs * 3u) n <<= 1;
+    uint16_t *tb = calloc(n, sizeof *tb);
+    for (int k = 0; k < ngstubs && k < 65535; k++) {
+        uint32_t h = (gstubs[k].addr * 2654435761u) >> 12 & (n - 1);
+        while (tb[h]) h = (h + 1) & (n - 1);
+        tb[h] = (uint16_t)(k + 1);
+    }
+    stub_mask = n - 1; stub_slot = tb;
+}
 static void enter(CPU *c, uint32_t t) {
     for (int k = 0; k < noverrides; k++)
         if (overrides[k].addr == t) { overrides[k].fn(c); c->esp += 4; return; }
@@ -667,9 +687,14 @@ static void enter(CPU *c, uint32_t t) {
         c->esp += 4; return;
     }
     const GFunc *f = func_at(t);
-    if (f) { f->fn(c); return; }
-    for (int k = 0; k < ngstubs; k++)   // the address of a stub, taken as a function pointer
-        if (gstubs[k].addr == t) { gstubs[k].fn(c); c->esp += 4; return; }
+    if (f) { __atomic_store_n(&ci_recent[(t >> 4 ^ t >> 16) & 4095], (uint64_t)t << 32 | (uint32_t)(f - gfuncs), __ATOMIC_RELAXED); f->fn(c); return; }
+    {   // the address of a stub, taken as a function pointer (the game keeps the system's lock functions in a table
+        // and locks through it, thousands of times a frame: the stubs are looked up by a table of their own)
+        static uint16_t *slot; static uint32_t mask; static pthread_once_t once = PTHREAD_ONCE_INIT;
+        if (__builtin_expect(!slot, 0)) pthread_once(&once, stub_table_build), slot = stub_slot, mask = stub_mask;
+        for (uint32_t h = (t * 2654435761u) >> 12 & mask; slot[h]; h = (h + 1) & mask)
+            if (gstubs[slot[h] - 1].addr == t) { gstubs[slot[h] - 1].fn(c); c->esp += 4; return; }
+    }
     if (t < D->null_floor) {
         fprintf(stderr, "  [aot] call through a null pointer (0x%x), at %08x in %s; eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x\n",
                 t, rd32(c->esp), rt_func_name(rd32(c->esp)), c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi);
@@ -725,6 +750,11 @@ void I__CFBundleGetFunctionPointerForName(CPU *c) {
 // given and what it answered.
 static uint32_t callsite = 1, callsite_hi;   // or DR_CALLSITE=lo-hi: every indirect call that returns into that range
 void call_ind(CPU *c, uint32_t t) {
+    if (__builtin_expect(callsite == 0, 1)) {
+        uint64_t rv = __atomic_load_n(&ci_recent[(t >> 4 ^ t >> 16) & 4095], __ATOMIC_RELAXED);
+        if ((uint32_t)(rv >> 32) == t && rv) { gfuncs[(uint32_t)rv].fn(c); return; }
+        enter(c, t); return;
+    }
     ncalls_ind++;
     if (callsite == 1) {
         const char *e = getenv("DR_CALLSITE"); char *dash = NULL;

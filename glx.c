@@ -96,6 +96,7 @@ void gl_trace_args(const char *name, CPU *c, int nslots) { (void)name; (void)c; 
 // game turns on the multithreaded OpenGL engine, where a question waits for every command queued before it, and the
 // question came with every vertex pointer and every draw: 3752 of them a frame in play. So the bindings are followed
 // here instead, from the calls that change them: per context, and the element array's per vertex array object.
+void *gl_ptr_element(uint32_t g);
 typedef struct { CGLContextObj ctx; GLuint array, unpack, pack, vao; struct { GLuint vao, elem; } el[256]; int nel; } Binds;
 static Binds binds_of[8]; static int nbinds; static pthread_mutex_t binds_mx = PTHREAD_MUTEX_INITIALIZER;
 static Binds *binds(void) {
@@ -131,10 +132,11 @@ void I__glBindBuffer(CPU *c) {
     GLenum target = ARG(0); GLuint buf = ARG(1);
     Binds *b = binds();
     if (b) {
-        if (target == GL_ARRAY_BUFFER) b->array = buf;
+        // binding what is already bound is skipped: each call is a command packed for the OpenGL thread
+        if (target == GL_ARRAY_BUFFER) { if (b->array == buf && buf) return; b->array = buf; }
         else if (target == GL_PIXEL_UNPACK_BUFFER) b->unpack = buf;
         else if (target == GL_PIXEL_PACK_BUFFER) b->pack = buf;
-        else if (target == GL_ELEMENT_ARRAY_BUFFER) { GLuint *e = elem_slot(b, 1); if (e) *e = buf; }
+        else if (target == GL_ELEMENT_ARRAY_BUFFER) { GLuint *e = elem_slot(b, 1); if (e) { if (*e == buf && buf) return; *e = buf; } }
     }
     glBindBuffer(target, buf);
 }
@@ -167,6 +169,16 @@ void I__glDeleteVertexArraysAPPLE(CPU *c) {
         if (b->vao == ids[i]) b->vao = 0;
     }
     glDeleteVertexArraysAPPLE(n, ids);
+}
+// An instanced draw of one instance is an ordinary draw (instance 0 is what a plain draw uses for attributes with a
+// divisor). The difference is in the multithreaded engine: it runs an instanced draw at once, on the calling thread,
+// after everything queued before it, and the game makes some 300 of them a frame; the plain draw is queued.
+void I__glDrawElementsInstancedBaseVertex(CPU *c) {
+    GLsizei n = (GLsizei)ARG(4);
+    long eb = tracked(GL_ELEMENT_ARRAY_BUFFER);
+    const void *idx = eb > 0 ? (void *)(uintptr_t)ARG(3) : eb == 0 ? P(ARG(3)) : gl_ptr_element(ARG(3));
+    if (n == 1) { gl_trace("glDrawElementsInstancedBaseVertex (one instance)"); glDrawElementsBaseVertex(ARG(0), (GLsizei)ARG(1), ARG(2), idx, (GLint)ARG(5)); }
+    else { gl_trace("glDrawElementsInstancedBaseVertex"); glDrawElementsInstancedBaseVertex(ARG(0), (GLsizei)ARG(1), ARG(2), idx, n, (GLint)ARG(5)); }
 }
 static void *maybe(GLenum target, GLenum binding, uint32_t g) {
     long t = tracked(target);

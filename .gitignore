@@ -3,6 +3,8 @@ orig.bin
 gen/
 build/
 build-mc/
+build-*/
+pgo/
 .venv/
 *.log
 shot_*.png

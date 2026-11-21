@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <sched.h>
 #include <semaphore.h>
 #include <stdio.h>
@@ -140,6 +141,7 @@ void I__pthread_create(CPU *c) {   // (pthread_t *thread, attr, start, arg)
     t->start = ARG(2); t->arg = ARG(3);
     // Translated code nests on the host's stack as deep as the guest does on its own, with larger frames.
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
+    pthread_attr_set_qos_class_np(&a, QOS_CLASS_USER_INTERACTIVE, 0);   // a game's threads: performance cores, full speed
     int r = pthread_create(&t->host, &a, thread_main, t);
     if (!r && ARG(0)) wr32(ARG(0), (uint32_t)h + 1);
     fprintf(stderr, "  [hilos] hilo %d creado, arranca en %s (0x%08x), pila de %u KB\n", h + 1, rt_func_name(t->start), t->start, ss >> 10);
