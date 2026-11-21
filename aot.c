@@ -98,6 +98,7 @@ static uint32_t *ip_calls;
 // A process that ends without the game having asked (no "_exit" line): say from where, on the host's side.
 static void skip_setup(void);
 static void nap_setup(void);
+static void scale_setup(void);
 static void at_exit_note(void) {
     void *bt[24]; int n = backtrace(bt, 24);
     fprintf(stderr, "  [aot] the process is exiting; the host's stack:\n");
@@ -179,7 +180,7 @@ static bool ip_import(dr_cpu *d, uint32_t thunk, void *user) {
 }
 static void ip_setup(void) {
     atexit(at_exit_note);
-    skip_setup(); nap_setup();
+    skip_setup(); nap_setup(); scale_setup();
     const char *w = getenv("BMAA_INTERP");
     if (w && getenv("BMAA_INTERP_STATS")) ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls);
     for (char *e; w && *w && ip_n < 16; w = *e ? e + 1 : e) {
@@ -267,7 +268,20 @@ static void nap_setup(void) {
         fprintf(stderr, "  [aot] %08x (%s) waits %d ms on entry (BMAA_SLEEP_AT)\n", a, rt_func_name(a), nap_ms[nap_n - 1]);
     }
 }
+// BMAA_ARG_SCALE=addr:slot:factor: the float argument in that slot (0 = first) of that function is multiplied on
+// entry (an experiment: one part of the game told a different time step from the rest)
+static uint32_t scale_at; static int scale_slot = -1; static float scale_by;
+static void scale_setup(void) {
+    const char *w = getenv("BMAA_ARG_SCALE"); char *e;
+    if (!w) return;
+    scale_at = (uint32_t)strtoul(w, &e, 16); if (*e != ':') return;
+    scale_slot = (int)strtol(e + 1, &e, 10); if (*e != ':') { scale_slot = -1; return; }
+    scale_by = strtof(e + 1, NULL);
+    rt_watch[scale_at >> 3] |= (uint8_t)(1u << (scale_at & 7));
+    fprintf(stderr, "  [aot] %08x: float argument %d times %g (BMAA_ARG_SCALE)\n", scale_at, scale_slot, (double)scale_by);
+}
 int rt_on_watch(CPU *c, uint32_t a) {
+    if (scale_slot >= 0 && a == scale_at) { uint32_t p = c->esp + 4 + 4 * (uint32_t)scale_slot; float v; uint32_t b = rd32(p); memcpy(&v, &b, 4); v *= scale_by; memcpy(&b, &v, 4); wr32(p, b); return 0; }
     for (int k = 0; k < nap_n; k++) if (nap_at[k] == a) { usleep((useconds_t)nap_ms[k] * 1000); return 0; }
     for (int k = 0; k < skip_n; k++) if (skip_at[k] == a) { c->esp += 4; return 1; }
     if (ip_n && ip_wanted(a)) return ip_run(c, a);
