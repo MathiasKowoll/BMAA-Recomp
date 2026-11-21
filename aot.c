@@ -523,14 +523,32 @@ static void out(void) {
     memcpy(D->st, G.st, sizeof G.st); D->fpu_top = G.top; D->fpu_cw = G.fcw; D->mxcsr = G.mxcsr;
 }
 
-static const GFunc *func_at(uint32_t a) {
-    int lo = 0, hi = ngfuncs - 1;
-    while (lo <= hi) {
-        int m = (lo + hi) / 2;
-        if (gfuncs[m].addr == a) return &gfuncs[m];
-        if (gfuncs[m].addr < a) lo = m + 1; else hi = m - 1;
+// The function that starts at an address. Every indirect call of the game asks (a virtual method, a function
+// pointer), tens of thousands of times a frame: a binary search over 130 000 functions was a sixth of the render
+// thread's time. A hash table built once answers in one probe or two.
+static uint32_t *fa_slot; static uint32_t fa_mask; static pthread_once_t fa_once = PTHREAD_ONCE_INIT;
+static void fa_build(void) {
+    uint32_t n = 1; while (n < (uint32_t)ngfuncs * 3u) n <<= 1;
+    uint32_t *t = malloc(n * sizeof *t); memset(t, 0xFF, n * sizeof *t);
+    for (int i = 0; i < ngfuncs; i++) {
+        uint32_t h = (gfuncs[i].addr * 2654435761u) >> 8 & (n - 1);
+        while (t[h] != 0xFFFFFFFFu) h = (h + 1) & (n - 1);
+        t[h] = (uint32_t)i;
     }
-    return NULL;
+    fa_mask = n - 1; fa_slot = t;
+}
+// In front of it, a small table of the last answers (address and index in one word, so that a thread reading while
+// another writes sees one answer or the other): the few hundred targets a frame really calls stay in the cache.
+static _Atomic uint64_t fa_recent[4096];
+static inline const GFunc *func_at(uint32_t a) {
+    uint64_t *r = (uint64_t *)&fa_recent[(a >> 4 ^ a >> 16) & 4095], rv = __atomic_load_n(r, __ATOMIC_RELAXED);
+    if ((uint32_t)(rv >> 32) == a && rv) return &gfuncs[(uint32_t)rv];
+    if (__builtin_expect(!fa_slot, 0)) pthread_once(&fa_once, fa_build);
+    for (uint32_t h = (a * 2654435761u) >> 8 & fa_mask; ; h = (h + 1) & fa_mask) {
+        uint32_t i = fa_slot[h];
+        if (i == 0xFFFFFFFFu) return NULL;
+        if (gfuncs[i].addr == a) { __atomic_store_n(r, (uint64_t)a << 32 | i, __ATOMIC_RELAXED); return &gfuncs[i]; }
+    }
 }
 static const GFunc *func_holding(uint32_t a) {
     int lo = 0, hi = ngfuncs - 1, best = -1;

@@ -19,6 +19,11 @@ EXTRA_CFLAGS += -ffp-contract=off
 ifeq ($(TSO),1)
 EXTRA_CFLAGS += -DRT_TSO
 endif
+# The translated code is compiled -O2 (the framework's default is -O1): it is three quarters of the render thread's
+# time in play. `make OPT=-O1` for the old build.
+OPT ?= -O2
+CFLAGS = $(OPT) -g -arch arm64 -mmacosx-version-min=$(MACOS_MIN) -Wno-unused-variable -Wno-unused-but-set-variable \
+         -Wno-deprecated-declarations -I$(M32)/runtime -DRT_M_CONST $(EXTRA_CFLAGS)
 include $(FW)/mac32/mac32.mk
 
 .venv:

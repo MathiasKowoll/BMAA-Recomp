@@ -56,8 +56,33 @@ static uint32_t handle(const void *h) {
 static uint32_t gstr(const char *s) { uint32_t g = aot_malloc((uint32_t)strlen(s) + 1); strcpy((char *)G2H(g), s); return g; }
 
 // ---- tracing (BMAA_TRACE_GL=1: every call by name, and the error the one before it raised) ----
+// BMAA_GL_COUNT=1: how many times a frame each OpenGL function is called, every 300 frames (the names are the
+// shims' own string constants, so a call is counted by the address of its name).
+static int counting = -1;
+static struct { const char *name; _Atomic unsigned long n; } gl_counts[512];
+static void gl_count(const char *name) {
+    for (unsigned h = (unsigned)((uintptr_t)name >> 3) & 511; ; h = (h + 1) & 511) {
+        if (gl_counts[h].name == name) { gl_counts[h].n++; return; }
+        if (!gl_counts[h].name) { gl_counts[h].name = name; gl_counts[h].n++; return; }   // a lost race costs one count
+    }
+}
+static void gl_count_frame(void) {
+    static unsigned long frames;
+    if (counting != 1 || ++frames % 300) return;
+    fprintf(stderr, "  [gl] calls a frame over 300 frames:");
+    for (int r = 0; r < 40; r++) {
+        int best = -1;
+        for (int k = 0; k < 512; k++) if (gl_counts[k].name && gl_counts[k].n && (best < 0 || gl_counts[k].n > gl_counts[best].n)) best = k;
+        if (best < 0) break;
+        fprintf(stderr, " %s %.1f;", gl_counts[best].name, gl_counts[best].n / 300.0); gl_counts[best].n = 0;
+    }
+    for (int k = 0; k < 512; k++) gl_counts[k].n = 0;
+    fprintf(stderr, "\n");
+}
 static int tracing = -1;
 void gl_trace(const char *name) {
+    if (__builtin_expect(counting < 0, 0)) counting = getenv("BMAA_GL_COUNT") != NULL;
+    if (__builtin_expect(counting, 0)) gl_count(name);
     if (tracing < 0) tracing = getenv("BMAA_TRACE_GL") != NULL;
     if (tracing) {
         GLenum e = CGLGetCurrentContext() ? glGetError() : 0;
@@ -67,14 +92,99 @@ void gl_trace(const char *name) {
 void gl_trace_args(const char *name, CPU *c, int nslots) { (void)name; (void)c; (void)nslots; }
 
 // ---- pointers that are offsets when a buffer is bound ----
-static void *maybe(GLenum binding, uint32_t g) {
-    GLint b = 0; glGetIntegerv(binding, &b);
-    return b ? (void *)(uintptr_t)g : P(g);
+// Whether a buffer is bound decides what a "pointer" argument is, and OpenGL can be asked (glGetIntegerv). But the
+// game turns on the multithreaded OpenGL engine, where a question waits for every command queued before it, and the
+// question came with every vertex pointer and every draw: 3752 of them a frame in play. So the bindings are followed
+// here instead, from the calls that change them: per context, and the element array's per vertex array object.
+typedef struct { CGLContextObj ctx; GLuint array, unpack, pack, vao; struct { GLuint vao, elem; } el[256]; int nel; } Binds;
+static Binds binds_of[8]; static int nbinds; static pthread_mutex_t binds_mx = PTHREAD_MUTEX_INITIALIZER;
+static Binds *binds(void) {
+    static _Thread_local Binds *last;
+    CGLContextObj x = CGLGetCurrentContext();
+    if (last && last->ctx == x) return last;
+    pthread_mutex_lock(&binds_mx);
+    Binds *b = NULL;
+    for (int k = 0; k < nbinds; k++) if (binds_of[k].ctx == x) b = &binds_of[k];
+    if (!b && nbinds < 8) { b = &binds_of[nbinds++]; b->ctx = x; }
+    pthread_mutex_unlock(&binds_mx);
+    if (b) last = b;
+    return b;
 }
-void *gl_ptr_array(uint32_t g)   { return maybe(GL_ARRAY_BUFFER_BINDING, g); }
-void *gl_ptr_element(uint32_t g) { return maybe(GL_ELEMENT_ARRAY_BUFFER_BINDING, g); }
-void *gl_ptr_unpack(uint32_t g)  { return maybe(GL_PIXEL_UNPACK_BUFFER_BINDING, g); }
-void *gl_ptr_pack(uint32_t g)    { return maybe(GL_PIXEL_PACK_BUFFER_BINDING, g); }
+static GLuint *elem_slot(Binds *b, int make) {
+    for (int k = 0; k < b->nel; k++) if (b->el[k].vao == b->vao) return &b->el[k].elem;
+    if (!make || b->nel >= 256) return NULL;
+    b->el[b->nel].vao = b->vao; b->el[b->nel].elem = 0;
+    return &b->el[b->nel++].elem;
+}
+// what is bound to one of the four targets that matter here; -1 when this context is not being followed
+static long tracked(GLenum target) {
+    Binds *b = binds();
+    if (!b) return -1;
+    if (target == GL_ARRAY_BUFFER) return b->array;
+    if (target == GL_PIXEL_UNPACK_BUFFER) return b->unpack;
+    if (target == GL_PIXEL_PACK_BUFFER) return b->pack;
+    if (target == GL_ELEMENT_ARRAY_BUFFER) { GLuint *e = elem_slot(b, 0); return e ? *e : 0; }
+    return -1;
+}
+void I__glBindBuffer(CPU *c) {
+    gl_trace("glBindBuffer");
+    GLenum target = ARG(0); GLuint buf = ARG(1);
+    Binds *b = binds();
+    if (b) {
+        if (target == GL_ARRAY_BUFFER) b->array = buf;
+        else if (target == GL_PIXEL_UNPACK_BUFFER) b->unpack = buf;
+        else if (target == GL_PIXEL_PACK_BUFFER) b->pack = buf;
+        else if (target == GL_ELEMENT_ARRAY_BUFFER) { GLuint *e = elem_slot(b, 1); if (e) *e = buf; }
+    }
+    glBindBuffer(target, buf);
+}
+void I__glBindVertexArrayAPPLE(CPU *c) {
+    gl_trace("glBindVertexArrayAPPLE");
+    Binds *b = binds(); if (b) b->vao = ARG(0);
+    glBindVertexArrayAPPLE(ARG(0));
+}
+// A deleted buffer is unbound wherever the current context had it; a deleted vertex array takes its binding with it.
+void I__glDeleteBuffers(CPU *c) {
+    gl_trace("glDeleteBuffers");
+    int n = (int)ARG(0); const GLuint *ids = P(ARG(1));
+    Binds *b = binds();
+    for (int i = 0; b && ids && i < n; i++) {
+        GLuint id = ids[i]; if (!id) continue;
+        if (b->array == id) b->array = 0;
+        if (b->unpack == id) b->unpack = 0;
+        if (b->pack == id) b->pack = 0;
+        for (int k = 0; k < b->nel; k++) if (b->el[k].elem == id) b->el[k].elem = 0;
+    }
+    glDeleteBuffers(n, ids);
+}
+void I__glDeleteVertexArraysAPPLE(CPU *c) {
+    gl_trace("glDeleteVertexArraysAPPLE");
+    int n = (int)ARG(0); const GLuint *ids = P(ARG(1));
+    Binds *b = binds();
+    for (int i = 0; b && ids && i < n; i++) {
+        if (!ids[i]) continue;
+        for (int k = 0; k < b->nel; k++) if (b->el[k].vao == ids[i]) b->el[k] = b->el[--b->nel];
+        if (b->vao == ids[i]) b->vao = 0;
+    }
+    glDeleteVertexArraysAPPLE(n, ids);
+}
+static void *maybe(GLenum target, GLenum binding, uint32_t g) {
+    long t = tracked(target);
+    if (t < 0) { GLint q = 0; gl_trace("(binding asked for a pointer)"); glGetIntegerv(binding, &q); t = q; }
+    else {   // BMAA_GL_BIND_CHECK=1: OpenGL is asked as well, and a difference is reported (the first 20)
+        static int check = -1, told; if (check < 0) check = getenv("BMAA_GL_BIND_CHECK") != NULL;
+        if (check) {
+            static unsigned long asked; GLint q = 0; glGetIntegerv(binding, &q);
+            if (++asked % 500000 == 0) fprintf(stderr, "  [gl] bindings checked %lu times, %d differences\n", asked, told);
+            if (q != t && told++ < 20) fprintf(stderr, "  [gl] binding 0x%x followed as %ld, OpenGL says %d\n", binding, t, q);
+        }
+    }
+    return t ? (void *)(uintptr_t)g : P(g);
+}
+void *gl_ptr_array(uint32_t g)   { return maybe(GL_ARRAY_BUFFER, GL_ARRAY_BUFFER_BINDING, g); }
+void *gl_ptr_element(uint32_t g) { return maybe(GL_ELEMENT_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER_BINDING, g); }
+void *gl_ptr_unpack(uint32_t g)  { return maybe(GL_PIXEL_UNPACK_BUFFER, GL_PIXEL_UNPACK_BUFFER_BINDING, g); }
+void *gl_ptr_pack(uint32_t g)    { return maybe(GL_PIXEL_PACK_BUFFER, GL_PIXEL_PACK_BUFFER_BINDING, g); }
 
 // ---- strings ----
 void I__glGetString(CPU *c) {
@@ -122,6 +232,8 @@ static uint8_t no_flush_on_unmap[8192];
 static Mapping maps[256];
 static pthread_mutex_t maps_mx = PTHREAD_MUTEX_INITIALIZER;
 static GLuint bound(GLenum target) {
+    { long t = tracked(target); if (t >= 0) return (GLuint)t; }
+    gl_trace("(binding asked for a buffer)");
     GLenum q = target == GL_ARRAY_BUFFER ? GL_ARRAY_BUFFER_BINDING : target == GL_ELEMENT_ARRAY_BUFFER ? GL_ELEMENT_ARRAY_BUFFER_BINDING :
                target == GL_PIXEL_UNPACK_BUFFER ? GL_PIXEL_UNPACK_BUFFER_BINDING : target == GL_PIXEL_PACK_BUFFER ? GL_PIXEL_PACK_BUFFER_BINDING :
                target == GL_UNIFORM_BUFFER ? GL_UNIFORM_BUFFER_BINDING : target == GL_COPY_READ_BUFFER ? GL_COPY_READ_BUFFER :
@@ -162,24 +274,24 @@ static Mapping *mapping(GLenum target) {
     for (int i = 0; i < 256; i++) if (maps[i].shadow && maps[i].buf == buf && maps[i].target == target) return &maps[i];
     return NULL;
 }
-void I__glMapBuffer(CPU *c) {
+void I__glMapBuffer(CPU *c) { gl_trace("glMapBuffer");
     GLint size = 0; glGetBufferParameteriv(ARG(0), GL_BUFFER_SIZE, &size);
     // a write-only mapping still holds the buffer's contents: what the game leaves unwritten must stay as it was
     RET(map_range(ARG(0), 0, size, 1, ARG(1) != GL_READ_ONLY, 0));
 }
-void I__glMapBufferRange(CPU *c) {
+void I__glMapBufferRange(CPU *c) { gl_trace("glMapBufferRange");
     GLbitfield acc = ARG(3);
     // a write-only mapping that does not promise to overwrite everything still shows the old contents
     int read = (acc & GL_MAP_READ_BIT) || !(acc & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT));
     RET(map_range(ARG(0), (GLintptr)(int32_t)ARG(1), (GLsizeiptr)(int32_t)ARG(2), read, (acc & GL_MAP_WRITE_BIT) != 0, (acc & GL_MAP_FLUSH_EXPLICIT_BIT) != 0));
 }
 // (target, offset within the mapping, length): what the game says it has written so far
-void I__glFlushMappedBufferRange(CPU *c) {
+void I__glFlushMappedBufferRange(CPU *c) { gl_trace("glFlushMappedBufferRange");
     pthread_mutex_lock(&maps_mx); Mapping *m = mapping(ARG(0)); pthread_mutex_unlock(&maps_mx);
     if (m && m->write) glBufferSubData(m->target, m->off + (int32_t)ARG(1), (GLsizeiptr)(int32_t)ARG(2), (uint8_t *)G2H(m->shadow) + (int32_t)ARG(1));
 }
 void I__glFlushMappedBufferRangeAPPLE(CPU *c) { I__glFlushMappedBufferRange(c); }
-void I__glUnmapBuffer(CPU *c) {
+void I__glUnmapBuffer(CPU *c) { gl_trace("glUnmapBuffer");
     pthread_mutex_lock(&maps_mx); Mapping *m = mapping(ARG(0)); Mapping mm = m ? *m : (Mapping){0}; if (m) m->shadow = 0; pthread_mutex_unlock(&maps_mx);
     if (!mm.shadow) { RET(GL_FALSE); return; }
     if (mm.write && !mm.explicit) glBufferSubData(mm.target, mm.off, mm.len, G2H(mm.shadow));
@@ -261,23 +373,22 @@ static void frame_sleep(void) {
     static int ms = -1; if (ms < 0) ms = getenv("BMAA_FRAME_SLEEP_MS") ? atoi(getenv("BMAA_FRAME_SLEEP_MS")) : 0;
     if (ms > 0) usleep((useconds_t)ms * 1000);
 }
-// The game steps the cape's physics (its own compartment) at a fixed 1/60 s, two steps a frame at most (sub_8bf060),
-// which comes out even only when frames are a whole number of 1/60 s apart, as they were on the 60 Hz displays it
-// was made for with vertical sync on. Here the display may be 120 Hz and the engine's own limit is 62 a second, so
-// frames came at any interval, some got no physics step and others two, and the cape was whipped about: measured,
-// it hangs still at 30 a second and flaps more the further the rate is from that.
-// So every frame is shown on the next tick of a BMAA_PACE_HZ clock (60; 0 turns it off), as vertical sync would.
+// Frames are shown no faster than BMAA_PACE_HZ a second (60; 0 turns the limit off): the display may be 120 Hz and
+// the engine's own limit is 62. (This began as a cure for the cape, which it was not: see aot.c on stack alignment.)
 static void pace_frame(void) {
-    static double hz = -1; static uint64_t base;
+    static double hz = -1; static uint64_t last;
     if (hz < 0) hz = getenv("BMAA_PACE_HZ") ? atof(getenv("BMAA_PACE_HZ")) : 60;
     if (hz <= 0) return;
+    // A limit, not a grid: a frame that took longer than a period is shown at once. (Waiting for the next tick of a
+    // fixed clock, as this did first, made a 35 ms frame a 50 ms one: a fifth of the render thread asleep in play.)
     uint64_t period = (uint64_t)(1e9 / hz), now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (!base) base = now;
-    uint64_t target = base + ((now - base) / period + 1) * period;
-    struct timespec ts = { 0, (long)(target - now) };
-    nanosleep(&ts, NULL);
+    if (last && now < last + period) {
+        struct timespec ts = { 0, (long)(last + period - now) };
+        nanosleep(&ts, NULL);
+        last += period;
+    } else last = now;
 }
-void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_error_census(); dump_frame(); fps_frame(); frame_sleep(); pace_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
+void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_count_frame(); gl_error_census(); dump_frame(); fps_frame(); frame_sleep(); pace_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
 void I__CGLClearDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? CGLClearDrawable(x) : kCGLBadContext); }
 void I__CGLGetShareGroup(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? handle(CGLGetShareGroup(x)) : 0); }
 void I__CGLQueryRendererInfo(CPU *c) {
