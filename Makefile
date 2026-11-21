@@ -1,7 +1,7 @@
 # Batman: Arkham Asylum GOTY (Feral's Mac port, i386) on Recomp-Framework's mac32 target.
 #   ln -s "<...>/Batman Arkham Asylum GOTY.app/Contents/MacOS/Batman Arkham Asylum GOTY" orig.bin
 #   make gen && make -j app
-# The framework is the user's fork, branch mac32-function-starts (the executable is stripped: its functions come
+# The framework is the user's fork, branch mac32-ports (the executable is stripped: its functions come
 # from LC_FUNCTION_STARTS).
 FW        = ../Recomp-Framework
 PYTHON    = .venv/bin/python

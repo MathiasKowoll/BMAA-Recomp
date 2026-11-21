@@ -17,7 +17,7 @@ You build the port on your Mac from your own copy.
 - Apple's command line tools (`xcode-select --install`), `python3`.
 - FFmpeg and pkg-config, for the game's movies: `brew install ffmpeg pkg-config`.
 - Beside this folder, [Recomp-Framework](https://github.com/MathiasKowoll/Recomp-Framework) (branch
-  `mac32-function-starts`) and DecompRecomp, whose runtime the port uses.
+  `mac32-ports`) and DecompRecomp, whose runtime the port uses.
 
 ## Build and play
 
@@ -49,3 +49,8 @@ Known: the title screen stays black when the movies are skipped with `-nomovie`.
   `BMAA_INTERP`, `BMAA_ENTRIES`; those need `make dr TRACE=1 BUILD=build-trace`).
 - `glx.c`, `bink.c`, `au.c`, `al.c`, `pad.m`, `steam.c`, `threads.c`, `fast.c`: OpenGL, movies, audio, controllers,
   Steam, threads and the C library, as this game uses them.
+
+## Licence
+
+GPL-3.0-or-later (see `LICENSE`), the same as MacGameFix. It covers these sources only: the game is its
+publishers', and none of it is distributed here.
