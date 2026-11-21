@@ -95,6 +95,8 @@ static void on_term(int sig) {
 }
 static int watching_some;
 static uint32_t *ip_calls;
+static uint32_t ip_probe;
+static int ip_entries_only;   // BMAA_INTERP_STATS=2: only the entries from translated code (what the game calls)
 // A process that ends without the game having asked (no "_exit" line): say from where, on the host's side.
 static void skip_setup(void);
 static void nap_setup(void);
@@ -114,12 +116,68 @@ static void watch_some(void) {
         rt_watch[a >> 3] |= (uint8_t)(1u << (a & 7)); watching_some = 1;
     }
 }
+
+// ---- the engine's names (DR_WATCH_UOBJ=1) ----
+// An Unreal object keeps its name as an index into the engine's table of names. The table is found once, by
+// looking in the guest's memory for the entries of two names every game has ("ByteProperty", "IntProperty": the
+// second and third of the table) and then for the two pointers to them side by side. Reads go through the kernel
+// (mach_vm_read_overwrite), so a word that is not an address is refused instead of ending the thread.
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+static int safe_read(uint32_t g, void *out, size_t n) {
+    mach_vm_size_t got = 0;
+    return mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)(M + g), n, (mach_vm_address_t)(uintptr_t)out, &got) == KERN_SUCCESS && got == n;
+}
+static uint32_t safe32(uint32_t g) { uint32_t v = 0; safe_read(g, &v, 4); return v; }
+static uint32_t names_data; static int names_off;
+static uint32_t mem_find(const void *pat, size_t n, uint32_t from) {
+    mach_vm_address_t a = (mach_vm_address_t)(uintptr_t)(M + from), end = (mach_vm_address_t)(uintptr_t)(M + 0xA0000000u);
+    while (a < end) {
+        mach_vm_size_t sz = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        mach_vm_address_t r = a;
+        if (mach_vm_region(mach_task_self(), &r, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS || r >= end) break;
+        mach_vm_address_t lo = r > a ? r : a, hi = r + sz < end ? r + sz : end;
+        if ((info.protection & VM_PROT_READ) && hi > lo) {
+            const uint8_t *hit = memmem((const void *)(uintptr_t)lo, (size_t)(hi - lo), pat, n);
+            if (hit) return (uint32_t)(hit - M);
+        }
+        a = r + sz;
+    }
+    return 0;
+}
+static void names_find(void) {
+    static int tried; if (tried) return; tried = 1;
+    for (uint32_t s1 = 0x1000; (s1 = mem_find("\0ByteProperty", 14, s1 + 1)) != 0; ) {
+        for (uint32_t s2 = 0x1000; (s2 = mem_find("\0IntProperty", 13, s2 + 1)) != 0; ) {
+            for (int off = 8; off <= 24; off += 4) {
+                uint32_t pair[2] = { s1 + 1 - (uint32_t)off, s2 + 1 - (uint32_t)off };
+                uint32_t at = mem_find(pair, 8, 0x1000);
+                if (at) { names_data = at - 4; names_off = off; fprintf(stderr, "  [names] the table is at %08x, a name's text %d bytes into its entry\n", names_data, off); return; }
+            }
+        }
+    }
+    fprintf(stderr, "  [names] the table of names was not found\n");
+}
+static const char *name_str(uint32_t idx, char *buf, size_t n) {
+    buf[0] = 0;
+    if (!names_data || idx > 4000000) return buf;
+    uint32_t e = safe32(names_data + 4 * idx);
+    if (e) { safe_read(e + (uint32_t)names_off, buf, n - 1); buf[n - 1] = 0; }
+    for (char *q = buf; *q; q++) if (*q < 32 || *q > 126) { *q = 0; break; }
+    return buf;
+}
+// An object as "Outer.Outer.Name" (its name is at +0x2c and its outer at +0x28).
+static void uobj_show(const char *what, uint32_t o) {
+    char b[3][64]; uint32_t o1 = safe32(o + 0x28), o2 = o1 ? safe32(o1 + 0x28) : 0;
+    fprintf(stderr, "        %s %08x: %s.%s.%s\n", what, o, o2 ? name_str(safe32(o2 + 0x2c), b[0], 64) : "", o1 ? name_str(safe32(o1 + 0x2c), b[1], 64) : "", name_str(safe32(o + 0x2c), b[2], 64));
+}
 static void show(uint32_t p) {
     if (p < 0x1000 || p >= 0xE0000000u) return;
     if (p < 0x60000000u && !(p < 0x04000000u || (p >= 0x1f000000u && p < 0x20000000u) || (p >= 0x40000000u && p < 0x51000000u))) return;
     if (p >= 0xA0000000u) return;   // past the guest heap: a float's bits, not a pointer
     fprintf(stderr, "        %08x:", p);
-    for (int k = 0; k < 32; k++) fprintf(stderr, " %02x", rd8(p + k));
+    static int nbytes; if (!nbytes) nbytes = getenv("DR_WATCH_BYTES") ? atoi(getenv("DR_WATCH_BYTES")) : 32;   // a matrix needs 48
+    for (int k = 0; k < nbytes; k++) fprintf(stderr, " %02x", rd8(p + k));
     fprintf(stderr, "  |");
     for (int k = 0; k < 32; k++) { uint8_t ch = rd8(p + k); fputc(ch >= 32 && ch < 127 ? ch : '.', stderr); }
     fprintf(stderr, "|\n");
@@ -182,7 +240,8 @@ static void ip_setup(void) {
     atexit(at_exit_note);
     skip_setup(); nap_setup(); scale_setup();
     const char *w = getenv("BMAA_INTERP");
-    if (w && getenv("BMAA_INTERP_STATS")) ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls);
+    if (getenv("BMAA_IP_PROBE")) ip_probe = (uint32_t)strtoul(getenv("BMAA_IP_PROBE"), NULL, 16);
+    if (w && getenv("BMAA_INTERP_STATS")) { ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls); ip_entries_only = atoi(getenv("BMAA_INTERP_STATS")) == 2; }
     for (char *e; w && *w && ip_n < 16; w = *e ? e + 1 : e) {
         uint32_t lo = (uint32_t)strtoul(w, &e, 16), hi = lo;
         if (e == w) break;
@@ -226,9 +285,17 @@ static int ip_run(CPU *c, uint32_t a) {
         if (st != DR_ERR_LIMIT) break;
         uint32_t at = d->eip;
         const GFunc *f = func_at(at);
-        if (ip_wanted(at)) { if (f && ip_calls) ip_calls[f - gfuncs]++; continue; }
+        // BMAA_IP_PROBE=addr: at that instruction of an interpreted function, the low floats of xmm0-7 and what
+        // the function's first argument points at (five words): the values a comparison is about to compare
+        if (at == ip_probe) {
+            float x[8]; for (int k = 0; k < 8; k++) memcpy(&x[k], (char *)d->xmm + 16 * k, 4);
+            uint32_t t = rd32(d->regs[DR_EBP] + 8);
+            fprintf(stderr, "  [probe] %g %g %g %g %g %g %g %g  this=%x: %x %x %x %x %x %x\n", x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
+                    t, rd32(t), rd32(t + 4), rd32(t + 8), rd32(t + 12), rd32(t + 16), rd32(t + 20));
+        }
+        if (ip_wanted(at)) { if (f && ip_calls && !ip_entries_only) ip_calls[f - gfuncs]++; continue; }
         if (!f) continue;                        // inside a function (a jump table target, a block): carry on
-        if (ip_calls) ip_calls[f - gfuncs]++;
+        if (ip_calls && !ip_entries_only) ip_calls[f - gfuncs]++;
         ip_from_interp(c, d);
         uint32_t back = rd32(c->esp);
         f->fn(c);                                // the translated function; it pops its return address
@@ -301,9 +368,12 @@ int rt_on_watch(CPU *c, uint32_t a) {
         for (int k = 0; k < 64; k++) {
             if (seen[k].a == a || !seen[k].a) { seen[k].a = a; if (++seen[k].n > watch_max) return 0; break; }
         }
-        fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
-                rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx);
-        for (int k = 1; k <= 4; k++) show(rd32(c->esp + 4 * k));
+        fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x esp=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
+                rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx, c->esp);   // esp: 12 mod 16 on entry, by the ABI
+        // DR_WATCH_ARGS=n: how many arguments to follow (a float that looks like an address is read as one, and
+        // reading where nothing is mapped ends the thread)
+        static int nargs; if (!nargs) nargs = getenv("DR_WATCH_ARGS") ? atoi(getenv("DR_WATCH_ARGS")) : 4;
+        for (int k = 1; k <= nargs; k++) show(rd32(c->esp + 4 * k));
         // DR_WATCH_SET=n: the first argument is an engine set/map whose elements are n bytes and start with a string
         // object; its keys, once (to see what a lookup is looked up against)
         if (getenv("DR_WATCH_SET")) {
@@ -317,6 +387,19 @@ int rt_on_watch(CPU *c, uint32_t a) {
                     for (uint32_t k = 0; d && k < n && k < 80; k++) { uint32_t ch = rd16(d + 2u * k); if (!ch) break; fputc(ch >= 32 && ch < 127 ? (int)ch : '.', stderr); }
                     fprintf(stderr, "  [next %d hashidx %d]\n", (int)rd32(e + sz - 8), (int)rd32(e + sz - 4));
                 }
+            }
+        }
+        // DR_WATCH_UOBJ=1: the watched function is a script native (this, Stack, Result): the object, and the chain of
+        // script functions that led here (each frame's function at +0x10, its object at +0x14? and the frame before)
+        if (getenv("DR_WATCH_UOBJ") && a >= strtoul(getenv("DR_WATCH_UOBJ"), NULL, 16) && a <= strtoul(strchr(getenv("DR_WATCH_UOBJ"), '-') ? strchr(getenv("DR_WATCH_UOBJ"), '-') + 1 : getenv("DR_WATCH_UOBJ"), NULL, 16)) {   // DR_WATCH_UOBJ=lo-hi: for the natives in that range
+            names_find();
+            uobj_show("this", rd32(c->esp + 4));
+            uint32_t fr = rd32(c->esp + 8);
+            for (int depth = 0; fr && depth < 8; depth++) {
+                for (int k = 4; k <= 0x30; k += 4) { uint32_t w = safe32(fr + (uint32_t)k); if (w > 0x60000000u && w < 0xA0000000u && safe32(w) > 0x2900000u && safe32(w) < 0x3700000u) { char t[16]; snprintf(t, sizeof t, "frame%d+%02x", depth, k); uobj_show(t, w); } }
+                uint32_t prev = 0;
+                for (int k = 0x1c; k <= 0x28 && !prev; k += 4) { uint32_t w = safe32(fr + (uint32_t)k); if (w > 0x40000000u && w < 0x51000000u && w > fr) prev = w; }
+                fr = prev;
             }
         }
         if (getenv("DR_WATCH_LAST")) show_last();   // and what this thread was last told by the bridge
@@ -1024,7 +1107,11 @@ dr_status dr_cpu_call_nested2(dr_cpu *given, uint32_t func, const uint32_t *args
 
     cpu->nest_depth++;
     cpu->magic_ret = 0xDEAD0000u + (uint32_t)cpu->nest_depth;
-    cpu->regs[DR_ESP] = stack_top & ~15u;
+    // The i386 Mac ABI: esp is a multiple of 16 where the call is made, that is, once the arguments are in place.
+    // The compiler leans on it (it ORs an index into the address of a local it knows to be aligned, and uses
+    // movaps on locals), so a function entered 4 or 8 bytes off computes wrong values without faulting here:
+    // every quaternion the game made from a matrix on such a thread had a component missing.
+    cpu->regs[DR_ESP] = (stack_top & ~15u) - ((16u - (4u * (uint32_t)argc & 15u)) & 15u);
     for (int i = argc - 1; i >= 0; i--) dr_push(cpu, args[i]);
     dr_push(cpu, cpu->magic_ret);
     cpu->eip = func;
@@ -1151,6 +1238,7 @@ void aot_thread_begin(CPU *c) {
 uint32_t guest_call(CPU *c, uint32_t addr, int nargs, const uint32_t *args) {
     if (Gt != c) aot_thread_begin(c);
     uint32_t sp = c->esp;
+    c->esp = (sp & ~15u) - ((16u - (4u * (uint32_t)nargs & 15u)) & 15u);   // 16-aligned once the arguments are pushed (see dr_cpu_call_nested2)
     for (int i = nargs - 1; i >= 0; i--) PUSH(args[i]);
     PUSH(0xDEAD0000u);
     out();

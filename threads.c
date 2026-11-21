@@ -78,7 +78,17 @@ void I__pthread_mutex_init(CPU *c) {
 }
 void I__pthread_mutex_destroy(CPU *c) { RET(0); }
 void I__pthread_mutex_lock(CPU *c) { RET(pthread_mutex_lock(MX(ARG(0)))); }
-void I__pthread_mutex_trylock(CPU *c) { RET(pthread_mutex_trylock(MX(ARG(0)))); }
+// BMAA_TRYLOCK_STATS=1: the try-locks that did not get the mutex, by who asked (PhysX drops the call it guards)
+void I__pthread_mutex_trylock(CPU *c) {
+    int r = pthread_mutex_trylock(MX(ARG(0)));
+    static int on = -1; if (on < 0) on = getenv("BMAA_TRYLOCK_STATS") != NULL;
+    if (on) {
+        static _Atomic unsigned tries, fails;
+        tries++;
+        if (r) { unsigned n = ++fails; if (n <= 400 || n % 500 == 0) fprintf(stderr, "  [trylock] busy #%u of %u tries, asked from %08x\n", n, (unsigned)tries, rd32(c->ebp + 4)); }
+    }
+    RET(r);
+}
 void I__pthread_mutex_unlock(CPU *c) { RET(pthread_mutex_unlock(MX(ARG(0)))); }
 
 // ---------- conditions ----------
