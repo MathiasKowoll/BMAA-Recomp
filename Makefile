@@ -106,10 +106,13 @@ $(BUILD)/dr/steam.o: steam.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c steam.c -o $@
 $(BUILD)/dr/pad.o: pad.m $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -Wno-unused-parameter -I$(DR_INC) -I$(M32)/runtime -c pad.m -o $@
 $(BUILD)/dr/fps.o: fps.m
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c fps.m -o $@
 $(BUILD)/dr/dbg.o: dbg.m
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -fobjc-arc -c dbg.m -o $@
 $(BUILD)/dr/ct.o: ct.c $(M32_HDR) $(DR_HDR)
 	@mkdir -p $(dir $@)
@@ -127,19 +130,23 @@ $(BUILD)/dr/heapdbg.o: heapdbg.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c heapdbg.c -o $@
 $(BUILD)/dr/au.o: au.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -Wno-four-char-constants -Wno-multichar -I$(DR_INC) -I$(M32)/runtime -c au.c -o $@
 # the movies: Bink's calls answered on FFmpeg (brew install ffmpeg)
 FF_CFLAGS := $(shell pkg-config --cflags libavformat libavcodec libavutil)
 FF_LIBS   := $(shell pkg-config --libs libavformat libavcodec libavutil)
 $(BUILD)/dr/bink.o: bink.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations $(FF_CFLAGS) -I$(DR_INC) -I$(M32)/runtime -c bink.c -o $@
 # DecompRecomp's interpreter, a second time under other names: for BMAA_INTERP (aot.c)
 IP_NAMES = dr_cpu_backtrace dr_cpu_call_nested dr_cpu_call_nested2 dr_cpu_dump dr_cpu_fpush dr_cpu_init dr_cpu_install_fault_handler \
            dr_cpu_profile_report dr_cpu_ring_dump dr_cpu_run dr_cpu_setup_call dr_cpu_skip_function dr_status_str
 $(BUILD)/dr/interp.o: $(DR)/src/x86.c tools/interp_patch.py $(DR_HDR)
+	@mkdir -p $(dir $@)
 	python3 tools/interp_patch.py $(DR)/src/x86.c $(BUILD)/dr-src/x86_ip.c
 	$(CC) $(DR_FLAGS) $(foreach n,$(IP_NAMES),-D$(n)=ip_$(patsubst dr_%,%,$(n))) -c $(BUILD)/dr-src/x86_ip.c -o $@
 $(BUILD)/dr/al.o: al.c $(M32_HDR) $(DR_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -I$(DR_INC) -I$(M32)/runtime -c al.c -o $@
 $(BUILD)/dr/glx.o: glx.c $(M32_HDR) $(DR_HDR)
 	@mkdir -p $(dir $@)
@@ -148,6 +155,7 @@ $(BUILD)/dr/gl_gen.c: $(M32)/tools/glgen.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) $(M32)/tools/glgen.py $@
 $(BUILD)/dr/gl_gen.o: $(BUILD)/dr/gl_gen.c $(M32_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wno-deprecated-declarations -Wno-\#warnings -I$(M32)/runtime -c $(BUILD)/dr/gl_gen.c -o $@
 $(BUILD)/dr/fast.o: fast.c $(M32_HDR)
 	@mkdir -p $(dir $@)
