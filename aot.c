@@ -94,7 +94,10 @@ static void on_term(int sig) {
     _exit(143);
 }
 static int watching_some;
+static uint32_t *ip_calls;
+static void ip_setup(void);
 static void watch_some(void) {
+    ip_setup();
     const char *w = getenv("DR_WATCH");
     for (char *e; w && *w; w = *e ? e + 1 : e) {
         uint32_t a = (uint32_t)strtoul(w, &e, 16);
@@ -133,7 +136,105 @@ static void show(uint32_t p) {
         fprintf(stderr, "\"\n");
     }
 }
-void rt_on_watch(CPU *c, uint32_t a) {
+// ---- BMAA_INTERP=lo-hi[,lo-hi...]: run the game's functions that start in those ranges with DecompRecomp's
+// interpreter instead of their translation (and whatever they call, until they return). Everything else stays
+// translated. It is for finding a fault of the translation: if a thing goes right with a range interpreted, the
+// translation of something in that range is wrong, and halving the range finds the function.
+// The interpreter is x86.c built a second time under other names (interp.o); its imports come back here and are
+// answered by the same shims the translated code calls.
+dr_status ip_cpu_run(dr_cpu *cpu); void ip_cpu_init(dr_cpu *cpu, dr_guest *g);
+static dr_cpu *main_cpu; static _Thread_local CPU *Gt; static void stop(dr_status s) __attribute__((noreturn));   // defined below
+static const GFunc *func_at(uint32_t a);
+static uint32_t ip_lo[16], ip_hi[16]; static int ip_n;
+static _Thread_local dr_cpu *ip_cpu[8]; static _Thread_local int ip_depth;
+static unsigned long ip_runs;
+static void ip_to_interp(dr_cpu *d, CPU *c) {
+    d->regs[DR_EAX] = c->eax; d->regs[DR_ECX] = c->ecx; d->regs[DR_EDX] = c->edx; d->regs[DR_EBX] = c->ebx;
+    d->regs[DR_ESP] = c->esp; d->regs[DR_EBP] = c->ebp; d->regs[DR_ESI] = c->esi; d->regs[DR_EDI] = c->edi;
+    memcpy(d->xmm, c->xmm, sizeof d->xmm); memcpy(d->st, c->st, sizeof d->st); d->fpu_top = c->top; d->fpu_cw = c->fcw; d->mxcsr = c->mxcsr;
+}
+static void ip_from_interp(CPU *c, dr_cpu *d) {
+    c->eax = d->regs[DR_EAX]; c->ecx = d->regs[DR_ECX]; c->edx = d->regs[DR_EDX]; c->ebx = d->regs[DR_EBX];
+    c->esp = d->regs[DR_ESP]; c->ebp = d->regs[DR_EBP]; c->esi = d->regs[DR_ESI]; c->edi = d->regs[DR_EDI];
+    memcpy(c->xmm, d->xmm, sizeof d->xmm); memcpy(c->st, d->st, sizeof d->st); c->top = d->fpu_top; c->fcw = d->fpu_cw;
+    if (c->mxcsr != d->mxcsr) cpu_set_mxcsr(c, d->mxcsr);
+}
+static int stub_of_thunk(uint32_t t);
+static bool ip_import(dr_cpu *d, uint32_t thunk, void *user) {
+    CPU *c = Gt; (void)user;
+    int k = stub_of_thunk(thunk);
+    if (k < 0 || !gstubs[k].fn) { fprintf(stderr, "  [interp] import at thunk %08x has no shim here\n", thunk); return false; }
+    ip_from_interp(c, d);
+    gstubs[k].fn(c);
+    ip_to_interp(d, c);
+    return true;
+}
+static void ip_setup(void) {
+    const char *w = getenv("BMAA_INTERP");
+    if (w && getenv("BMAA_INTERP_STATS")) ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls);
+    for (char *e; w && *w && ip_n < 16; w = *e ? e + 1 : e) {
+        uint32_t lo = (uint32_t)strtoul(w, &e, 16), hi = lo;
+        if (e == w) break;
+        if (*e == '-') hi = (uint32_t)strtoul(e + 1, &e, 16);
+        ip_lo[ip_n] = lo; ip_hi[ip_n] = hi; ip_n++;
+        int nf = 0;
+        for (int i = 0; i < ngfuncs; i++) if (gfuncs[i].addr >= lo && gfuncs[i].addr <= hi) { uint32_t a = gfuncs[i].addr; rt_watch[a >> 3] |= (uint8_t)(1u << (a & 7)); nf++; }
+        fprintf(stderr, "  [interp] %d functions from %08x to %08x run in the interpreter\n", nf, lo, hi);
+    }
+}
+static int ip_wanted(uint32_t a) { for (int k = 0; k < ip_n; k++) if (a >= ip_lo[k] && a <= ip_hi[k]) return 1; return 0; }
+// BMAA_INTERP_STATS=1: how often each function was entered from interpreted code (the interpreted ones and the
+// translated ones they call), printed every 20 seconds: which part of the chosen code really runs.
+static double ip_calls_t;
+static void ip_calls_report(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    double t = (double)ts.tv_sec;
+    if (!ip_calls_t) ip_calls_t = t;
+    if (t - ip_calls_t < 20) return;
+    ip_calls_t = t;
+    fprintf(stderr, "  [interp] entries in the last 20 s:");
+    for (int i = 0; i < ngfuncs; i++) if (ip_calls[i]) { fprintf(stderr, " %x%s:%u", gfuncs[i].addr, ip_wanted(gfuncs[i].addr) ? "" : "(t)", ip_calls[i]); ip_calls[i] = 0; }
+    fprintf(stderr, "\n");
+}
+static int ip_run(CPU *c, uint32_t a) {
+    if (ip_depth >= 8) return 0;
+    if (ip_calls && ip_depth == 0) { const GFunc *f0 = func_at(a); if (f0) ip_calls[f0 - gfuncs]++; ip_calls_report(); }
+    dr_cpu *d = ip_cpu[ip_depth];
+    if (!d) { d = ip_cpu[ip_depth] = calloc(1, sizeof *d); ip_cpu_init(d, main_cpu->g); d->on_import = ip_import; d->ilimit = ~0ull; }
+    uint32_t ret = rd32(c->esp);
+    ip_to_interp(d, c);
+    wr32(c->esp, d->magic_ret);                 // the function returns to the interpreter's "done" address
+    d->eip = a; d->exited = d->threw = d->faulted = false; d->tail_jump = false; d->nest_depth = 0;
+    ip_depth++;
+    // One instruction at a time, so that a call (or a jump) to a function outside the ranges goes to its translation:
+    // only the chosen functions are interpreted, and the interpreter need only know their instructions.
+    dr_status st;
+    for (;;) {
+        d->ilimit = d->icount + 1;
+        st = ip_cpu_run(d);
+        if (st != DR_ERR_LIMIT) break;
+        uint32_t at = d->eip;
+        const GFunc *f = func_at(at);
+        if (ip_wanted(at)) { if (f && ip_calls) ip_calls[f - gfuncs]++; continue; }
+        if (!f) continue;                        // inside a function (a jump table target, a block): carry on
+        if (ip_calls) ip_calls[f - gfuncs]++;
+        ip_from_interp(c, d);
+        uint32_t back = rd32(c->esp);
+        f->fn(c);                                // the translated function; it pops its return address
+        ip_to_interp(d, c);
+        d->eip = back;
+        if (back == d->magic_ret) { st = DR_HALT_RET; break; }
+    }
+    ip_depth--;
+    ip_from_interp(c, d);
+    wr32(c->esp - 4, ret);                       // as the translated function would have left it
+    if (st != DR_HALT_RET) { fprintf(stderr, "  [interp] %08x (%s) ended: %s at %08x\n", a, rt_func_name(a), dr_status_str(st), d->eip); stop(st); }
+    if (ip_runs++ == 0) fprintf(stderr, "  [interp] the first function ran in the interpreter: %s\n", rt_func_name(a));
+    return 1;
+}
+int rt_on_watch(CPU *c, uint32_t a) {
+    if (ip_n && ip_wanted(a)) return ip_run(c, a);
+
     if (watching_some && rt_watch[0] != 0xFF) {
         // DR_WATCH_FROM=lo-hi: only the entries whose caller returns into that range (one function's calls)
         static uint32_t from_lo = 1, from_hi;
@@ -142,12 +243,12 @@ void rt_on_watch(CPU *c, uint32_t a) {
             from_lo = e ? (uint32_t)strtoul(e, &dash, 16) : 0;
             from_hi = (dash && *dash == '-') ? (uint32_t)strtoul(dash + 1, NULL, 16) : from_lo;
         }
-        if (from_lo && (rd32(c->esp) < from_lo || rd32(c->esp) > from_hi)) return;
+        if (from_lo && (rd32(c->esp) < from_lo || rd32(c->esp) > from_hi)) return 0;
         static struct { uint32_t a; int n; } seen[64];
         static int watch_max;
         if (!watch_max) watch_max = getenv("DR_WATCH_MAX") ? atoi(getenv("DR_WATCH_MAX")) : 40;
         for (int k = 0; k < 64; k++) {
-            if (seen[k].a == a || !seen[k].a) { seen[k].a = a; if (++seen[k].n > watch_max) return; break; }
+            if (seen[k].a == a || !seen[k].a) { seen[k].a = a; if (++seen[k].n > watch_max) return 0; break; }
         }
         fprintf(stderr, "  [watch] %08x from %08x (%s)  a=%08x,%08x,%08x,%08x  ecx=%08x\n", a, rd32(c->esp), rt_func_name(rd32(c->esp)),
                 rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12), rd32(c->esp + 16), c->ecx);
@@ -169,11 +270,12 @@ void rt_on_watch(CPU *c, uint32_t a) {
         }
         if (getenv("DR_WATCH_LAST")) show_last();   // and what this thread was last told by the bridge
         if (getenv("DR_WATCH_MORE")) show_more(atoi(getenv("DR_WATCH_MORE")));   // or the longer memory of it
-        return;
+        return 0;
     }
     fprintf(stderr, "  [fn] %08x %s  ret=%08x a=%08x,%08x,%08x  eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x esp=%08x\n",
             a, rt_func_name(a), rd32(c->esp), rd32(c->esp + 4), rd32(c->esp + 8), rd32(c->esp + 12),
             c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi, c->esp);
+    return 0;
 }
 
 static dr_cpu *main_cpu;                 // DecompRecomp's CPU: the main thread's
@@ -691,10 +793,18 @@ double fpu_round(CPU *c, double v) {
     default: return trunc(v);
     }
 }
+// MXCSR: rounding and the two "treat tiny numbers as zero" bits. The game sets flush-to-zero and denormals-are-zero
+// (0x8040) once and switches the rounding mode around its floor conversions (0x3f80 / 0x1f80). On ARM both live in
+// FPCR: RMode (bits 23:22) and FZ (bit 24), which flushes denormal inputs and results as x86 does with both bits.
+// BMAA_NO_FTZ=1 leaves denormals alone, as before.
 void cpu_set_mxcsr(CPU *c, uint32_t v) {
-    static const int mode[4] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+    static const uint64_t rmode[4] = {0, 2, 1, 3};             // x86 RC: nearest, down, up, zero -> ARM RMode: 00, 10, 01, 11
+    static int no_ftz = -1; if (no_ftz < 0) no_ftz = getenv("BMAA_NO_FTZ") != NULL;
     c->mxcsr = v;
-    fesetround(mode[(v >> 13) & 3]);
+    uint64_t f = __builtin_arm_rsr64("FPCR");
+    f = (f & ~((3ull << 22) | (1ull << 24))) | rmode[(v >> 13) & 3] << 22;
+    if (!no_ftz && (v & 0x8040)) f |= 1ull << 24;
+    __builtin_arm_wsr64("FPCR", f);
 }
 // CPUID. It used to say "leaf 1, no features at all": to the game a processor with no SSE and no SSE2, on which it
 // takes whatever paths it keeps for such a machine. It is told what the translated code really offers: an Intel

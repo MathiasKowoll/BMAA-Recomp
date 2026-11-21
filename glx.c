@@ -112,7 +112,12 @@ void I__glTransformFeedbackVaryings(CPU *c) {
 }
 
 // ---- buffer mappings: a copy in the game's memory, written back ----
-typedef struct { GLenum target; GLuint buf; uint32_t shadow; GLintptr off; GLsizeiptr len; int write, read; } Mapping;
+typedef struct { GLenum target; GLuint buf; uint32_t shadow; GLintptr off; GLsizeiptr len; int write, read, explicit; } Mapping;
+// Buffers the game told (glBufferParameteriAPPLE, GL_BUFFER_FLUSHING_UNMAP_APPLE = 0) that unmapping writes nothing:
+// only the ranges it flushes itself are written. It then writes a part of the mapping and counts on the rest of the
+// buffer staying as it was, so an unmap that wrote the whole copy back would wipe that rest.
+static uint8_t no_flush_on_unmap[8192];
+#define NOFLUSH(b) (no_flush_on_unmap[((b) >> 3) & 8191] & (1u << ((b) & 7)))
 static Mapping maps[256];
 static pthread_mutex_t maps_mx = PTHREAD_MUTEX_INITIALIZER;
 static GLuint bound(GLenum target) {
@@ -124,15 +129,25 @@ static GLuint bound(GLenum target) {
     GLint b = 0; if (q) glGetIntegerv(q, &b);
     return (GLuint)b;
 }
-static uint32_t map_range(GLenum target, GLintptr off, GLsizeiptr len, int read, int write) {
+void I__glBufferParameteriAPPLE(CPU *c) {
+    GLuint buf = bound(ARG(0));
+    if (ARG(1) == 0x8A12 /* GL_BUFFER_FLUSHING_UNMAP_APPLE */ && buf) {
+        if (ARG(2)) no_flush_on_unmap[(buf >> 3) & 8191] &= (uint8_t)~(1u << (buf & 7));
+        else no_flush_on_unmap[(buf >> 3) & 8191] |= (uint8_t)(1u << (buf & 7));
+    }
+    // GL_BUFFER_SERIALIZED_MODIFY_APPLE (0x8A13) is about waiting for the GPU: nothing to do with a copy
+}
+static uint32_t map_range(GLenum target, GLintptr off, GLsizeiptr len, int read, int write, int explicit) {
     GLuint buf = bound(target);
     if (!buf || len <= 0) return 0;
+    if (NOFLUSH(buf)) explicit = 1;
+    if (explicit) read = 0;                      // only what the game flushes is written: the rest of the copy is never used
     uint32_t shadow = aot_malloc((uint32_t)len);
     if (!shadow) return 0;
     if (read) glGetBufferSubData(target, off, len, G2H(shadow)); else memset(G2H(shadow), 0, (size_t)len);
     pthread_mutex_lock(&maps_mx);
     for (int i = 0; i < 256; i++) if (!maps[i].shadow) {
-        maps[i] = (Mapping){ target, buf, shadow, off, len, write, read };
+        maps[i] = (Mapping){ target, buf, shadow, off, len, write, read, explicit };
         pthread_mutex_unlock(&maps_mx);
         return shadow;
     }
@@ -148,13 +163,14 @@ static Mapping *mapping(GLenum target) {
 }
 void I__glMapBuffer(CPU *c) {
     GLint size = 0; glGetBufferParameteriv(ARG(0), GL_BUFFER_SIZE, &size);
-    RET(map_range(ARG(0), 0, size, ARG(1) != GL_WRITE_ONLY, ARG(1) != GL_READ_ONLY));
+    // a write-only mapping still holds the buffer's contents: what the game leaves unwritten must stay as it was
+    RET(map_range(ARG(0), 0, size, 1, ARG(1) != GL_READ_ONLY, 0));
 }
 void I__glMapBufferRange(CPU *c) {
     GLbitfield acc = ARG(3);
     // a write-only mapping that does not promise to overwrite everything still shows the old contents
     int read = (acc & GL_MAP_READ_BIT) || !(acc & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT));
-    RET(map_range(ARG(0), (GLintptr)(int32_t)ARG(1), (GLsizeiptr)(int32_t)ARG(2), read, (acc & GL_MAP_WRITE_BIT) != 0));
+    RET(map_range(ARG(0), (GLintptr)(int32_t)ARG(1), (GLsizeiptr)(int32_t)ARG(2), read, (acc & GL_MAP_WRITE_BIT) != 0, (acc & GL_MAP_FLUSH_EXPLICIT_BIT) != 0));
 }
 // (target, offset within the mapping, length): what the game says it has written so far
 void I__glFlushMappedBufferRange(CPU *c) {
@@ -165,7 +181,7 @@ void I__glFlushMappedBufferRangeAPPLE(CPU *c) { I__glFlushMappedBufferRange(c); 
 void I__glUnmapBuffer(CPU *c) {
     pthread_mutex_lock(&maps_mx); Mapping *m = mapping(ARG(0)); Mapping mm = m ? *m : (Mapping){0}; if (m) m->shadow = 0; pthread_mutex_unlock(&maps_mx);
     if (!mm.shadow) { RET(GL_FALSE); return; }
-    if (mm.write) glBufferSubData(mm.target, mm.off, mm.len, G2H(mm.shadow));
+    if (mm.write && !mm.explicit) glBufferSubData(mm.target, mm.off, mm.len, G2H(mm.shadow));
     aot_free(mm.shadow);
     RET(GL_TRUE);
 }
@@ -224,7 +240,17 @@ static void dump_frame(void) {
     free(px);
 }
 void fps_frame(void);
-void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { dump_frame(); fps_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
+// BMAA_GL_ERRORS=1: at the end of every frame, whatever errors OpenGL has been keeping (the game does not ask), by code.
+static void gl_error_census(void) {
+    static int on = -1; static unsigned long frames, counts[8];
+    if (on < 0) on = getenv("BMAA_GL_ERRORS") != NULL;
+    if (!on) return;
+    for (int k = 0; k < 16; k++) { GLenum e = glGetError(); if (!e) break; counts[(e - 0x0500) & 7]++; }
+    if (++frames % 600 == 0)
+        fprintf(stderr, "  [gl] errors in %lu frames: INVALID_ENUM %lu, INVALID_VALUE %lu, INVALID_OPERATION %lu, STACK %lu/%lu, OUT_OF_MEMORY %lu, INVALID_FRAMEBUFFER_OPERATION %lu\n",
+                frames, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]);
+}
+void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_error_census(); dump_frame(); fps_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
 void I__CGLClearDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? CGLClearDrawable(x) : kCGLBadContext); }
 void I__CGLGetShareGroup(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? handle(CGLGetShareGroup(x)) : 0); }
 void I__CGLQueryRendererInfo(CPU *c) {

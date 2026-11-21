@@ -14,6 +14,8 @@ GAME_SRC  = game32.c
 # Intel's memory ordering between threads for the translated code (rt.h, RT_TSO): the game's lock-free code relies on
 # it. Off by default: it did not change the cape and costs a quarter of the frame rate. `make TSO=1` builds with it.
 TSO ?= 0
+# The game's multiplies and adds are separate instructions with a rounding each; the compiler must not fuse them.
+EXTRA_CFLAGS += -ffp-contract=off
 ifeq ($(TSO),1)
 EXTRA_CFLAGS += -DRT_TSO
 endif
@@ -108,6 +110,12 @@ FF_CFLAGS := $(shell pkg-config --cflags libavformat libavcodec libavutil)
 FF_LIBS   := $(shell pkg-config --libs libavformat libavcodec libavutil)
 $(BUILD)/dr/bink.o: bink.c $(M32_HDR) $(DR_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations $(FF_CFLAGS) -I$(DR_INC) -I$(M32)/runtime -c bink.c -o $@
+# DecompRecomp's interpreter, a second time under other names: for BMAA_INTERP (aot.c)
+IP_NAMES = dr_cpu_backtrace dr_cpu_call_nested dr_cpu_call_nested2 dr_cpu_dump dr_cpu_fpush dr_cpu_init dr_cpu_install_fault_handler \
+           dr_cpu_profile_report dr_cpu_ring_dump dr_cpu_run dr_cpu_setup_call dr_cpu_skip_function dr_status_str
+$(BUILD)/dr/interp.o: $(DR)/src/x86.c tools/interp_patch.py $(DR_HDR)
+	python3 tools/interp_patch.py $(DR)/src/x86.c $(BUILD)/dr-src/x86_ip.c
+	$(CC) $(DR_FLAGS) $(foreach n,$(IP_NAMES),-D$(n)=ip_$(patsubst dr_%,%,$(n))) -c $(BUILD)/dr-src/x86_ip.c -o $@
 $(BUILD)/dr/al.o: al.c $(M32_HDR) $(DR_HDR)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -Wno-deprecated-declarations -I$(DR_INC) -I$(M32)/runtime -c al.c -o $@
 $(BUILD)/dr/glx.o: glx.c $(M32_HDR) $(DR_HDR)
@@ -124,7 +132,7 @@ $(BUILD)/dr/fast.o: fast.c $(M32_HDR)
 $(BUILD)/dr/dates.o: dates.c $(M32_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -arch arm64 -Wall -Wno-unused-parameter -I$(M32)/runtime -c dates.c -o $@
-BMAA_OBJ = $(BUILD)/dr/bink.o $(BUILD)/dr/fps.o $(BUILD)/dr/au.o $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/al.o $(BUILD)/dr/pad.o $(BUILD)/dr/input.o $(BUILD)/dr/heapdbg.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
+BMAA_OBJ = $(BUILD)/dr/interp.o $(BUILD)/dr/bink.o $(BUILD)/dr/fps.o $(BUILD)/dr/au.o $(BUILD)/dr/aot.o $(BUILD)/dr/game.o $(BUILD)/dr/trace.o $(BUILD)/dr/threads.o $(BUILD)/dr/steam.o $(BUILD)/dr/dates.o $(BUILD)/dr/dbg.o $(BUILD)/dr/fast.o $(BUILD)/dr/ct.o $(BUILD)/dr/eh.o $(BUILD)/dr/glx.o $(BUILD)/dr/al.o $(BUILD)/dr/pad.o $(BUILD)/dr/input.o $(BUILD)/dr/heapdbg.o $(BUILD)/dr/display.o $(BUILD)/dr/gl_gen.o
 $(BUILD)/dr-bmaa: $(BUILD)/libgame32.a $(DR_OBJ) $(BMAA_OBJ)
 	$(CC) -arch arm64 $(DR_OBJ) $(BMAA_OBJ) $(BUILD)/libgame32.a -lobjc -framework Foundation \
 	    -framework AppKit -framework Metal -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework OpenGL -framework OpenAL -framework AudioToolbox -framework CoreAudio -framework GameController $(FF_LIBS) -framework Carbon -o $@

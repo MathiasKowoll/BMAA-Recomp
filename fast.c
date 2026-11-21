@@ -144,8 +144,21 @@ void fast_posix_memalign(CPU *c) {   // (void **out, alignment, size): the heap'
 void I__malloc_size(CPU *c) { c->eax = ARG(0) ? aot_block_size(ARG(0)) : 0; }
 void I____bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
 void I__bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
-void I____isnanf(CPU *c) { c->eax = isnan(ARGF(0)) != 0; }
-void I____isinff(CPU *c) { c->eax = isinf(ARGF(0)) != 0; }
+// BMAA_TRACE_CAPE=1: the cape's own simulation (0x1c0000..0x1d3000) asks these of its numbers; a yes there means the
+// simulation has produced a value that is not a number, and where it first did is worth knowing.
+static void cape_note(CPU *c, const char *what, float v) {
+    static int on = -1, said; static unsigned long n;
+    if (on < 0) on = getenv("BMAA_TRACE_CAPE") != NULL;
+    uint32_t ra = rd32(c->esp);
+    if (!on || ra < 0x1c0000u || ra >= 0x1d3000u) return;
+    n++;
+    if (said < 12) { said++; fprintf(stderr, "  [cape] %s said yes (value %g) at 0x%x, call %lu\n", what, (double)v, ra, n); }
+    else if (n % 100000 == 0) fprintf(stderr, "  [cape] %lu invalid values so far\n", n);
+}
+static unsigned long cape_asked;
+void I____isnanf(CPU *c) { float v = ARGF(0); c->eax = isnan(v) != 0; if (c->eax) cape_note(c, "isnan", v); else if (rd32(c->esp) - 0x1c0000u < 0x13000u) cape_asked++; }
+void I____isinff(CPU *c) { float v = ARGF(0); c->eax = isinf(v) != 0; if (c->eax) cape_note(c, "isinf", v); }
+unsigned long cape_asked_count(void) { return cape_asked; }
 void I__cosf(CPU *c) { FPUSH((double)cosf(ARGF(0))); }
 void I__sinf(CPU *c) { FPUSH((double)sinf(ARGF(0))); }
 void I__acosf(CPU *c) { FPUSH((double)acosf(ARGF(0))); }
