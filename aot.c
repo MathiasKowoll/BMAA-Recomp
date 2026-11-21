@@ -95,6 +95,14 @@ static void on_term(int sig) {
 }
 static int watching_some;
 static uint32_t *ip_calls;
+// A process that ends without the game having asked (no "_exit" line): say from where, on the host's side.
+static void skip_setup(void);
+static void nap_setup(void);
+static void at_exit_note(void) {
+    void *bt[24]; int n = backtrace(bt, 24);
+    fprintf(stderr, "  [aot] the process is exiting; the host's stack:\n");
+    backtrace_symbols_fd(bt, n, 2);
+}
 static void ip_setup(void);
 static void watch_some(void) {
     ip_setup();
@@ -170,6 +178,8 @@ static bool ip_import(dr_cpu *d, uint32_t thunk, void *user) {
     return true;
 }
 static void ip_setup(void) {
+    atexit(at_exit_note);
+    skip_setup(); nap_setup();
     const char *w = getenv("BMAA_INTERP");
     if (w && getenv("BMAA_INTERP_STATS")) ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls);
     for (char *e; w && *w && ip_n < 16; w = *e ? e + 1 : e) {
@@ -232,7 +242,34 @@ static int ip_run(CPU *c, uint32_t a) {
     if (ip_runs++ == 0) fprintf(stderr, "  [interp] the first function ran in the interpreter: %s\n", rt_func_name(a));
     return 1;
 }
+// BMAA_SKIP=addr[,addr]: those functions return at once, doing nothing (plain "ret" functions whose result is not
+// used: the caller cleans the stack). An experiment's tool: what the game looks like without one step.
+static uint32_t skip_at[8]; static int skip_n = -1;
+static void skip_setup(void) {
+    skip_n = 0;
+    const char *w = getenv("BMAA_SKIP");
+    for (char *e; w && *w && skip_n < 8; w = *e ? e + 1 : e) {
+        uint32_t a = (uint32_t)strtoul(w, &e, 16);
+        if (e == w) break;
+        skip_at[skip_n++] = a; rt_watch[a >> 3] |= (uint8_t)(1u << (a & 7));
+        fprintf(stderr, "  [aot] %08x (%s) is skipped (BMAA_SKIP)\n", a, rt_func_name(a));
+    }
+}
+// BMAA_SLEEP_AT=addr:ms[,addr:ms]: the thread that enters that function first waits so many milliseconds (an
+// experiment: does something another thread is still doing get finished in that time?)
+static uint32_t nap_at[8]; static int nap_ms[8], nap_n;
+static void nap_setup(void) {
+    const char *w = getenv("BMAA_SLEEP_AT");
+    for (char *e; w && *w && nap_n < 8; w = *e ? e + 1 : e) {
+        uint32_t a = (uint32_t)strtoul(w, &e, 16);
+        if (e == w || *e != ':') break;
+        nap_ms[nap_n] = (int)strtol(e + 1, &e, 10); nap_at[nap_n++] = a; rt_watch[a >> 3] |= (uint8_t)(1u << (a & 7));
+        fprintf(stderr, "  [aot] %08x (%s) waits %d ms on entry (BMAA_SLEEP_AT)\n", a, rt_func_name(a), nap_ms[nap_n - 1]);
+    }
+}
 int rt_on_watch(CPU *c, uint32_t a) {
+    for (int k = 0; k < nap_n; k++) if (nap_at[k] == a) { usleep((useconds_t)nap_ms[k] * 1000); return 0; }
+    for (int k = 0; k < skip_n; k++) if (skip_at[k] == a) { c->esp += 4; return 1; }
     if (ip_n && ip_wanted(a)) return ip_run(c, a);
 
     if (watching_some && rt_watch[0] != 0xFF) {

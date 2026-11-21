@@ -120,7 +120,7 @@ void dbg_init(void) {
                     // The game looks at whether the application is active as it starts, and if it is not it
                     // suspends itself and never comes back (nothing tells it later that it was brought forward).
                     // A person who presses PLAY is in front by definition; pressing it for them has to put it there.
-                    if (seen % 5 >= 2 && seen % 5 <= 4) [NSApp activateIgnoringOtherApps:YES];
+                    if (seen % 5 >= 2 && seen % 5 <= 4 && !getenv("BMAA_BACKGROUND")) [NSApp activateIgnoringOtherApps:YES];   // BMAA_BACKGROUND=1: a test run stays behind whoever is using the Mac
                     if (seen++ % 5 == 3) fprintf(stderr, "  [page] PLAY pressed for the user (BMAA_AUTOPLAY)\n");
                     return;
                 }

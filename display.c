@@ -75,13 +75,19 @@ void I__CGDisplayRestoreColorSyncSettings(CPU *c) { }
 void I__CGDisplayRegisterReconfigurationCallback(CPU *c) { RET(0); }
 void I__CGDisplayRemoveReconfigurationCallback(CPU *c) { RET(0); }
 void I__CGWindowLevelForKey(CPU *c) { RET(CGWindowLevelForKey((CGWindowLevelKey)ARG(0))); }
-void I__CGEventSourceKeyState(CPU *c) { RET(CGEventSourceKeyState((CGEventSourceStateID)ARG(0), (CGKeyCode)ARG(1)) ? 1 : 0); }
 
 // The pointer is only moved or held when this process really is the one in front: a run that says it is in front
 // for a test (BMAA_ALWAYS_FRONT) must not take the pointer from whoever is using the Mac.
 static int really_front(void) {
     ProcessSerialNumber me, front; Boolean same = 0;
     return GetCurrentProcess(&me) == noErr && GetFrontProcess(&front) == noErr && SameProcess(&me, &front, &same) == noErr && same;
+}
+// The keyboard's state is the whole Mac's: a test run kept behind (BMAA_BACKGROUND) must not read what is being typed
+// into another application as its own keys.
+void I__CGEventSourceKeyState(CPU *c) {
+    static int bg = -1; if (bg < 0) bg = getenv("BMAA_BACKGROUND") != NULL;
+    if (bg && !really_front()) { RET(0); return; }
+    RET(CGEventSourceKeyState((CGEventSourceStateID)ARG(0), (CGKeyCode)ARG(1)) ? 1 : 0);
 }
 void I__CGSetLocalEventsSuppressionInterval(CPU *c) { RET(0); }   // (double seconds): nothing is suppressed after a warp nowadays
 void I__CGWarpMouseCursorPosition(CPU *c) {   // (CGPoint: two floats)

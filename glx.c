@@ -4,6 +4,7 @@
 // mappings (the game gets a copy in its own memory, written back when it unmaps), sync objects, and CGL, whose
 // context is a handle of the bridge's (the same one [NSOpenGLContext CGLContextObj] gives the game).
 #define GL_SILENCE_DEPRECATION
+#include <unistd.h>
 #include "dr_bridge.h"
 #include "dr_objc.h"
 #include "rt.h"
@@ -225,7 +226,9 @@ static void dump_frame(void) {
             if (t - t0 >= 5) { fprintf(stderr, "  [gl] %.1f frames a second (frame %d)\n", (frame - last) / (t - t0), frame); t0 = t; last = frame; }
         }
     }
-    if (!path || frame < at || (frame - at) % 300) return;
+    static int every = -1; if (every < 0) every = getenv("BMAA_GL_DUMP_EVERY") ? atoi(getenv("BMAA_GL_DUMP_EVERY")) : 300;   // frames between copies
+    if (every < 1) every = 300;
+    if (!path || frame < at || (frame - at) % every) return;
     GLint vp[4], fb = 0, rb = 0; glGetIntegerv(GL_VIEWPORT, vp); glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb); glGetIntegerv(GL_READ_BUFFER, &rb);
     int w = vp[0] + vp[2], h = vp[1] + vp[3];
     if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
@@ -234,7 +237,10 @@ static void dump_frame(void) {
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fb); glReadBuffer((GLenum)rb);
-    FILE *f = fopen(path, "wb");
+    // BMAA_GL_DUMP_SEQ=n: the copies go to path.0 .. path.(n-1) in turn instead of one file, to look at a stretch of frames
+    static int seq = -1, turn; if (seq < 0) seq = getenv("BMAA_GL_DUMP_SEQ") ? atoi(getenv("BMAA_GL_DUMP_SEQ")) : 0;
+    char name[1024]; if (seq > 0) { snprintf(name, sizeof name, "%s.%d", path, turn++ % seq); } else snprintf(name, sizeof name, "%s", path);
+    FILE *f = fopen(name, "wb");
     if (f) { fprintf(f, "P6 %d %d 255\n", w, h); for (int y = h - 1; y >= 0; y--) fwrite(px + (size_t)y * w * 3, 3, (size_t)w, f); fclose(f); }
     fprintf(stderr, "  [gl] frame %d written to %s (%dx%d, error 0x%x)\n", frame, path, w, h, glGetError());
     free(px);
@@ -250,7 +256,28 @@ static void gl_error_census(void) {
         fprintf(stderr, "  [gl] errors in %lu frames: INVALID_ENUM %lu, INVALID_VALUE %lu, INVALID_OPERATION %lu, STACK %lu/%lu, OUT_OF_MEMORY %lu, INVALID_FRAMEBUFFER_OPERATION %lu\n",
                 frames, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]);
 }
-void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_error_census(); dump_frame(); fps_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
+// BMAA_FRAME_SLEEP_MS=n: every frame waits that long before it is shown (an experiment: the game at a lower rate)
+static void frame_sleep(void) {
+    static int ms = -1; if (ms < 0) ms = getenv("BMAA_FRAME_SLEEP_MS") ? atoi(getenv("BMAA_FRAME_SLEEP_MS")) : 0;
+    if (ms > 0) usleep((useconds_t)ms * 1000);
+}
+// The game steps the cape's physics (its own compartment) at a fixed 1/60 s, two steps a frame at most (sub_8bf060),
+// which comes out even only when frames are a whole number of 1/60 s apart, as they were on the 60 Hz displays it
+// was made for with vertical sync on. Here the display may be 120 Hz and the engine's own limit is 62 a second, so
+// frames came at any interval, some got no physics step and others two, and the cape was whipped about: measured,
+// it hangs still at 30 a second and flaps more the further the rate is from that.
+// So every frame is shown on the next tick of a BMAA_PACE_HZ clock (60; 0 turns it off), as vertical sync would.
+static void pace_frame(void) {
+    static double hz = -1; static uint64_t base;
+    if (hz < 0) hz = getenv("BMAA_PACE_HZ") ? atof(getenv("BMAA_PACE_HZ")) : 60;
+    if (hz <= 0) return;
+    uint64_t period = (uint64_t)(1e9 / hz), now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!base) base = now;
+    uint64_t target = base + ((now - base) / period + 1) * period;
+    struct timespec ts = { 0, (long)(target - now) };
+    nanosleep(&ts, NULL);
+}
+void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_error_census(); dump_frame(); fps_frame(); frame_sleep(); pace_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
 void I__CGLClearDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? CGLClearDrawable(x) : kCGLBadContext); }
 void I__CGLGetShareGroup(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? handle(CGLGetShareGroup(x)) : 0); }
 void I__CGLQueryRendererInfo(CPU *c) {

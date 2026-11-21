@@ -146,6 +146,7 @@ void I____bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
 void I__bzero(CPU *c) { if (ARG(1)) memset(G2H(ARG(0)), 0, ARG(1)); }
 // BMAA_TRACE_CAPE=1: the cape's own simulation (0x1c0000..0x1d3000) asks these of its numbers; a yes there means the
 // simulation has produced a value that is not a number, and where it first did is worth knowing.
+static int cape_trace_on(void) { static int on = -1; if (on < 0) on = getenv("BMAA_TRACE_CAPE") != NULL; return on; }
 static void cape_note(CPU *c, const char *what, float v) {
     static int on = -1, said; static unsigned long n;
     if (on < 0) on = getenv("BMAA_TRACE_CAPE") != NULL;
@@ -163,7 +164,13 @@ void I__cosf(CPU *c) { FPUSH((double)cosf(ARGF(0))); }
 void I__sinf(CPU *c) { FPUSH((double)sinf(ARGF(0))); }
 void I__acosf(CPU *c) { FPUSH((double)acosf(ARGF(0))); }
 void I__fmodf(CPU *c) { FPUSH((double)fmodf(ARGF(0), ARGF(1))); }
-void I__powf(CPU *c) { FPUSH((double)powf(ARGF(0), ARGF(1))); }
+void I__powf(CPU *c) {
+    float r = powf(ARGF(0), ARGF(1));
+    if (cape_trace_on() && rd32(c->esp) - 0x1c7000u < 0x1000u) {   // the cape's damping: base, time step, result
+        static int n; if (n++ % 600 < 4) fprintf(stderr, "  [cape] powf(%g, %g) = %g from %08x\n", ARGF(0), ARGF(1), r, rd32(c->esp));
+    }
+    FPUSH((double)r);
+}
 void I____umoddi3(CPU *c) {
     uint64_t a = (uint64_t)ARG(0) | (uint64_t)ARG(1) << 32, b = (uint64_t)ARG(2) | (uint64_t)ARG(3) << 32;
     uint64_t r = b ? a % b : 0;
