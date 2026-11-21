@@ -113,6 +113,7 @@ static void at_exit_note(void) {
     backtrace_symbols_fd(bt, n, 2);
 }
 static void ip_setup(void);
+static void entries_setup(void);
 static void watch_some(void) {
     ip_setup();
     const char *w = getenv("DR_WATCH");
@@ -244,7 +245,7 @@ static bool ip_import(dr_cpu *d, uint32_t thunk, void *user) {
 }
 static void ip_setup(void) {
     atexit(at_exit_note);
-    skip_setup(); nap_setup(); scale_setup();
+    skip_setup(); nap_setup(); scale_setup(); entries_setup();
     const char *w = getenv("BMAA_INTERP");
     if (getenv("BMAA_IP_PROBE")) ip_probe = (uint32_t)strtoul(getenv("BMAA_IP_PROBE"), NULL, 16);
     if (w && getenv("BMAA_INTERP_STATS")) { ip_calls = calloc((size_t)ngfuncs, sizeof *ip_calls); ip_entries_only = atoi(getenv("BMAA_INTERP_STATS")) == 2; }
@@ -353,7 +354,42 @@ static void scale_setup(void) {
     rt_watch[scale_at >> 3] |= (uint8_t)(1u << (scale_at & 7));
     fprintf(stderr, "  [aot] %08x: float argument %d times %g (BMAA_ARG_SCALE)\n", scale_at, scale_slot, (double)scale_by);
 }
+// BMAA_ENTRIES=lo-hi (a build with TRACE=1): which functions of that range are called from outside it, and how often:
+// the interface a part of the game offers the rest. Every 10 seconds, the 150 most called, with calls a second.
+static uint32_t ent_lo, ent_hi; static uint32_t *ent_n; static double ent_t;
+static void entries_setup(void) {
+    const char *e = getenv("BMAA_ENTRIES"); char *dash = NULL;
+    if (!e) return;
+    ent_lo = (uint32_t)strtoul(e, &dash, 16); ent_hi = dash && *dash == '-' ? (uint32_t)strtoul(dash + 1, NULL, 16) : ent_lo;
+    ent_n = calloc((size_t)ngfuncs, sizeof *ent_n);
+    for (int i = 0; i < ngfuncs; i++) if (gfuncs[i].addr >= ent_lo && gfuncs[i].addr < ent_hi) { uint32_t a = gfuncs[i].addr; rt_watch[a >> 3] |= (uint8_t)(1u << (a & 7)); }
+    fprintf(stderr, "  [entries] counting calls into %08x-%08x from outside it\n", ent_lo, ent_hi);
+}
+static void entries_note(CPU *c, uint32_t a) {
+    uint32_t ra = rd32(c->esp);
+    if (ra >= ent_lo && ra < ent_hi) return;
+    const GFunc *f = func_at(a); if (!f) return;
+    ent_n[f - gfuncs]++;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double t = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    if (!ent_t) ent_t = t;
+    if (t - ent_t < 10) return;
+    static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
+    if (pthread_mutex_trylock(&mx)) return;
+    double dt = t - ent_t; ent_t = t; int distinct = 0;
+    for (int i = 0; i < ngfuncs; i++) if (ent_n[i]) distinct++;
+    fprintf(stderr, "  [entries] %d functions entered in %.0f s:", distinct, dt);
+    for (int r = 0; r < 150; r++) {
+        int best = -1;
+        for (int i = 0; i < ngfuncs; i++) if (ent_n[i] && (best < 0 || ent_n[i] > ent_n[best])) best = i;
+        if (best < 0) break;
+        fprintf(stderr, " %x:%.0f", gfuncs[best].addr, ent_n[best] / dt); ent_n[best] = 0;
+    }
+    for (int i = 0; i < ngfuncs; i++) ent_n[i] = 0;
+    fprintf(stderr, "\n");
+    pthread_mutex_unlock(&mx);
+}
 int rt_on_watch(CPU *c, uint32_t a) {
+    if (ent_n && a >= ent_lo && a < ent_hi) { entries_note(c, a); return 0; }   // that range is only counted while this is on
     if (scale_slot >= 0 && a == scale_at) { uint32_t p = c->esp + 4 + 4 * (uint32_t)scale_slot; float v; uint32_t b = rd32(p); memcpy(&v, &b, 4); v *= scale_by; memcpy(&b, &v, 4); wr32(p, b); return 0; }
     for (int k = 0; k < nap_n; k++) if (nap_at[k] == a) { usleep((useconds_t)nap_ms[k] * 1000); return 0; }
     for (int k = 0; k < skip_n; k++) if (skip_at[k] == a) { c->esp += 4; return 1; }
