@@ -5,5 +5,8 @@
 cd "$(dirname "$0")"
 export DR_DIALOGO=${DR_DIALOGO:-1} SteamAppId=35140 SteamGameId=35140 BMAA_AUTOPLAY=1 MTL_HUD_ENABLED=${MTL_HUD_ENABLED:-1} BMAA_FPS=${BMAA_FPS-1}
 # The movies play (bink.c). DR_ARGS="-nomovie -nostartupmovies" starts without them, for a quicker test.
+# A C++ exception the game throws is noted in the log with its type and where it came from (a few lines at most in a
+# session that goes well): the game ended on one after ten minutes of play and the log could not say which.
+export RT32_LOG_EH=${RT32_LOG_EH-1}
 export DR_ARGS="${DR_ARGS-}" LAUNCHER=1
 exec ./dr-try.sh 1000000
