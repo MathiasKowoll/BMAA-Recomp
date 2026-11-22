@@ -1,8 +1,6 @@
 #!/bin/bash
-# Steam's PLAY button starts this port instead of the original (which no longer runs on current macOS):
-# in Steam, the game's Properties > General > Launch Options:
-#     "/full/path/to/BMAA-Recomp/steam-play.sh" %command%
-# Steam then runs this script with the original's command line as arguments, which are not used. The game is
+# What Steam's PLAY button ends up running: steam-install.sh puts a launcher in the place of the game's program, and
+# the launcher starts this script (with Steam's arguments, which are not used). The game is
 # Steam's child, so Steam shows it as running and counts the time. Steam's overlay library is built for the
 # original's processor and is not loaded into this one.
 cd "$(dirname "$0")"

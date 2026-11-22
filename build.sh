@@ -15,6 +15,7 @@ APP="${1:-}"
 [ -n "$APP" ] || { [ -L orig.bin ] && APP="$(cd "$(dirname "$(readlink orig.bin)")/../.." && pwd)"; }
 [ -n "$APP" ] || die "usage: ./build.sh \"/path/to/Batman Arkham Asylum GOTY.app\""
 EXE="$APP/Contents/MacOS/Batman Arkham Asylum GOTY"
+[ -f "$EXE.orig" ] && EXE="$EXE.orig"     # steam-install.sh has put the launcher in its place
 
 say "1/5 checking this Mac and the game"
 [ "$(uname -m)" = arm64 ] || die "this port is for Apple Silicon"
@@ -46,4 +47,6 @@ say "4/5 compiling (several minutes the first time)"
 make -j"$(sysctl -n hw.ncpu)" dr
 
 [ -x build/dr-bmaa ] || die "the build did not produce build/dr-bmaa"
-say "5/5 done: ./play.sh starts the game (Steam must be running)"
+# Steam's own PLAY button starts the port from now on (NO_STEAM=1 leaves the game's folder as it is).
+if [ -z "${NO_STEAM:-}" ]; then ./steam-install.sh; fi
+say "5/5 done: press PLAY in Steam, or ./play.sh (Steam must be running)"

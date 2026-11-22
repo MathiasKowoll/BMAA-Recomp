@@ -29,11 +29,12 @@ You build the port on your Mac from your own copy.
 The first build translates the game's code (several minutes) and compiles it (about four minutes on twelve cores,
 some 3 GB of disk). After an update of these sources, `./build.sh` again rebuilds only what changed.
 
-To start the port from Steam's own Play button, put this in the game's Properties › General › Launch Options:
-
-```
-"/path/to/BMAA-Recomp/steam-play.sh" %command%
-```
+`build.sh` ends by making Steam's own Play button start the port: it puts a small launcher where the game's
+program is and keeps that program beside it, untouched, as `Batman Arkham Asylum GOTY.orig` (`NO_STEAM=1 ./build.sh`
+leaves the game's folder alone; `./steam-install.sh remove` puts the program back). Nothing in Steam's settings is
+changed, so the game must have **no launch options** of its own in Steam (Properties › General › Launch Options):
+Steam for the Mac runs the first word of that field as the program, and a leftover such as `WINEMSYNC=1 %command%`
+makes Play fail with "OS Error 260". After Steam's "Verify integrity of game files", run `./steam-install.sh` again.
 
 ## State
 
