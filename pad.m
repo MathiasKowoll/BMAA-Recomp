@@ -22,6 +22,7 @@ void aot_lock(void); void aot_unlock(void);
 dr_objc *dr_objc_actual(void);
 uint32_t aot_malloc(uint32_t n);
 uint32_t guest_call_here(uint32_t addr, int nargs, const uint32_t *args);
+void bmaa_pad_used(void);
 void unimpl_import(CPU *c, const char *name);
 
 #define RET(v) (c->eax = (uint32_t)(v))
@@ -289,6 +290,7 @@ void I__CFRunLoopRun(CPU *c) {
                 for (int e = 0; e < NELEM; e++) {
                     if (now[e] == p->last[e]) continue;
                     p->last[e] = now[e];
+                    if (e < NBUTTON ? now[e] != 0 : (now[e] > 12000 || now[e] < -12000)) bmaa_pad_used();   // display.c: the pointer is put away
                     wr32(p->value[e] + 4, (uint32_t)now[e]); wr32(p->value[e] + 8, (uint32_t)t); wr32(p->value[e] + 12, (uint32_t)(t >> 32));
                     if (tracing() && e < NBUTTON) fprintf(stderr, "  [pad] pad %d button %d %s\n", s + 1, e + 1, now[e] ? "down" : "up");
                     call4(cb_value, p->value[e]);

@@ -2,6 +2,7 @@
 // worlds; what the bridge's generic route cannot carry is a CGRect returned through a hidden pointer, a refresh rate
 // returned as a double, and the objects (modes, arrays of modes), which go to the game as handles.
 // The gamma table is read but never written: setting it would change the whole screen of whoever is sitting there.
+#include <stdatomic.h>
 #include "dr_bridge.h"
 #include "dr_objc.h"
 #include "rt.h"
@@ -98,9 +99,16 @@ void I__CGWarpMouseCursorPosition(CPU *c) {   // (CGPoint: two floats)
 // request made a moment before the window came forward is not lost, and the pointer is given back (and shown) for as
 // long as another application is in front. While held, the pointer is hidden too: a held pointer drawn in the middle
 // of the picture is no use to anyone. BMAA_TRACE_MOUSE=1 prints each request.
-static int mouse_wants_held, mouse_is_held;
+// A controller in use holds it as well: with a pad the game does not ask (it leaves the pointer free and, in the
+// original, drew its own empty cursor image, which the bridge does not carry), so the system's arrow sat over the
+// picture and a nudge of the mouse could click outside the game. Moving the mouse gives the pointer back, for the
+// menus; the next press on the pad takes it again.
+static int mouse_wants_held, mouse_is_held; static _Atomic int pad_in_use;
+void bmaa_mouse_apply(void);
+void bmaa_pad_used(void) { if (!pad_in_use) { pad_in_use = 1; bmaa_mouse_apply(); } }
+void bmaa_mouse_moved(void) { if (pad_in_use) { pad_in_use = 0; bmaa_mouse_apply(); } }
 void bmaa_mouse_apply(void) {
-    int hold = mouse_wants_held && really_front();
+    int hold = (mouse_wants_held || pad_in_use) && really_front();
     if (hold == mouse_is_held) return;
     mouse_is_held = hold;
     CGAssociateMouseAndMouseCursorPosition(!hold);

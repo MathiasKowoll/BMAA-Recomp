@@ -12,7 +12,19 @@ static NSPanel *panel; static NSTextField *label;
 // The bridge opens that window when the game's nib brings none, well before the first frame: for the half minute
 // the game takes to load it sat on screen, empty. It is put away the moment it shows.
 void bmaa_mouse_apply(void);   // display.c: the pointer is held only while this application is in front
+void bmaa_mouse_moved(void);   // and given back when the mouse itself is moved
 __attribute__((constructor)) static void hide_bridge_window(void) {
+    // The mouse being moved, seen from the system's count of its events (a held pointer does not move, and this
+    // needs no permission): four times a second, and more than a tremor's worth.
+    static dispatch_source_t mt;
+    mt = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(mt, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC / 4, NSEC_PER_MSEC * 30);
+    dispatch_source_set_event_handler(mt, ^{
+        static uint32_t last; uint32_t n = CGEventSourceCounterForEventType(kCGEventSourceStateHIDSystemState, kCGEventMouseMoved);
+        if (last && n - last > 6) bmaa_mouse_moved();
+        last = n;
+    });
+    dispatch_resume(mt);
     for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification])
         [[NSNotificationCenter defaultCenter] addObserverForName:name object:nil queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; bmaa_mouse_apply(); }];
