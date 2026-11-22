@@ -11,7 +11,11 @@ static NSPanel *panel; static NSTextField *label;
 
 // The bridge opens that window when the game's nib brings none, well before the first frame: for the half minute
 // the game takes to load it sat on screen, empty. It is put away the moment it shows.
+void bmaa_mouse_apply(void);   // display.c: the pointer is held only while this application is in front
 __attribute__((constructor)) static void hide_bridge_window(void) {
+    for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification])
+        [[NSNotificationCenter defaultCenter] addObserverForName:name object:nil queue:nil
+                                                      usingBlock:^(NSNotification *n) { (void)n; bmaa_mouse_apply(); }];
     [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidUpdateNotification object:nil queue:nil
         usingBlock:^(NSNotification *n) {
             NSWindow *w = n.object;

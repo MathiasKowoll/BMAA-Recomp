@@ -93,8 +93,25 @@ void I__CGSetLocalEventsSuppressionInterval(CPU *c) { RET(0); }   // (double sec
 void I__CGWarpMouseCursorPosition(CPU *c) {   // (CGPoint: two floats)
     RET(really_front() ? CGWarpMouseCursorPosition(CGPointMake(ARGF(0), ARGF(1))) : 0);
 }
+// The game holds the pointer while it is played (the mouse then only turns the camera) and lets it go for its menus:
+// one call each way. What it asked for is remembered and applied whenever this process is the one in front, so that a
+// request made a moment before the window came forward is not lost, and the pointer is given back (and shown) for as
+// long as another application is in front. While held, the pointer is hidden too: a held pointer drawn in the middle
+// of the picture is no use to anyone. BMAA_TRACE_MOUSE=1 prints each request.
+static int mouse_wants_held, mouse_is_held;
+void bmaa_mouse_apply(void) {
+    int hold = mouse_wants_held && really_front();
+    if (hold == mouse_is_held) return;
+    mouse_is_held = hold;
+    CGAssociateMouseAndMouseCursorPosition(!hold);
+    if (hold) CGDisplayHideCursor(CGMainDisplayID()); else CGDisplayShowCursor(CGMainDisplayID());
+    if (getenv("BMAA_TRACE_MOUSE")) fprintf(stderr, "  [mouse] the pointer is %s\n", hold ? "held and hidden" : "free and shown");
+}
 void I__CGAssociateMouseAndMouseCursorPosition(CPU *c) {
-    RET(really_front() || ARG(0) ? CGAssociateMouseAndMouseCursorPosition(ARG(0) != 0) : 0);
+    mouse_wants_held = ARG(0) == 0;
+    if (getenv("BMAA_TRACE_MOUSE")) fprintf(stderr, "  [mouse] the game asks for the pointer %s (in front: %d)\n", mouse_wants_held ? "held" : "free", really_front());
+    bmaa_mouse_apply();
+    RET(0);
 }
 
 // CGFloat f(CGRect by value): the answer on the x87 stack
