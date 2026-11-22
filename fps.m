@@ -9,6 +9,15 @@
 static atomic_uint frames;
 static NSPanel *panel; static NSTextField *label;
 
+// The bridge opens that window when the game's nib brings none, well before the first frame: for the half minute
+// the game takes to load it sat on screen, empty. It is put away the moment it shows.
+__attribute__((constructor)) static void hide_bridge_window(void) {
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidUpdateNotification object:nil queue:nil
+        usingBlock:^(NSNotification *n) {
+            NSWindow *w = n.object;
+            if (w.visible && [w.title hasPrefix:@"DecompRecomp"]) [w orderOut:nil];
+        }];
+}
 static void setup(void) {
     for (NSWindow *w in [NSApp windows]) if ([w.title hasPrefix:@"DecompRecomp"]) [w orderOut:nil];
     const char *on = getenv("BMAA_FPS"); if (!on || !*on || *on == (char)48) return;
