@@ -13,23 +13,31 @@ static NSPanel *panel; static NSTextField *label;
 // The bridge opens that window when the game's nib brings none, well before the first frame: for the half minute
 // the game takes to load it sat on screen, empty. It is put away the moment it shows.
 void bmaa_mouse_apply(void);   // display.c: the pointer is held only while this application is in front
-void bmaa_mouse_moved(void);   // and given back when the mouse itself is moved
+void bmaa_mouse_moved(void);
+void bmaa_mouse_over(int over);   // the pointer is over the game's window, and the game is drawing   // and given back when the mouse itself is moved
 // A key pressed in the game sounded the system's alert, as when typing where nothing takes the text: the game reads
 // its keys from the system's state, so the key's event finds no one to take it and AppKit beeps. Nothing in this
 // program wants that beep.
 static void no_beep(id self, SEL cmd, SEL event) { (void)self; (void)cmd; (void)event; }
 __attribute__((constructor)) static void hide_bridge_window(void) {
     class_replaceMethod([NSResponder class], @selector(noResponderFor:), (IMP)no_beep, "v@::");
+    // That was not all of it: a key no view takes arrives at the window, whose own keyDown: is what beeps.
+    class_replaceMethod([NSWindow class], @selector(keyDown:), (IMP)no_beep, "v@:@");
     // The mouse being moved, seen from the system's count of its events (a held pointer does not move, and this
-    // needs no permission): four times a second, and more than a tremor's worth.
+    // needs no permission): ten times a second, and more than a tremor's worth.
     static dispatch_source_t mt;
     mt = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(mt, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC / 4, NSEC_PER_MSEC * 30);
+    dispatch_source_set_timer(mt, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC / 10, NSEC_PER_MSEC * 20);
     dispatch_source_set_event_handler(mt, ^{
         static uint32_t last; uint32_t n = CGEventSourceCounterForEventType(kCGEventSourceStateHIDSystemState, kCGEventMouseMoved);
-        if (last && n - last > 6) bmaa_mouse_moved();
+        if (last && n - last > 3) bmaa_mouse_moved();
         last = n;
-        bmaa_mouse_apply();   // a pointer the game has stopped putting back is shown again
+        // Over the game's picture the system's pointer is never wanted: the game draws its own in its menus and
+        // none while it is played (the original put an empty image in its place, which the bridge does not carry).
+        int over = 0;
+        for (NSWindow *w in NSApp.windows)
+            if (w.visible && ![w isKindOfClass:[NSPanel class]] && NSPointInRect(NSEvent.mouseLocation, w.frame)) over = 1;
+        bmaa_mouse_over(over);
     });
     dispatch_resume(mt);
     for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification])

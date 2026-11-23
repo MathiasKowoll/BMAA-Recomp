@@ -387,7 +387,9 @@ static void frame_sleep(void) {
 }
 // Frames are shown no faster than BMAA_PACE_HZ a second (60; 0 turns the limit off): the display may be 120 Hz and
 // the engine's own limit is 62. (This began as a cure for the cape, which it was not: see aot.c on stack alignment.)
+void bmaa_frame_seen(void);   // display.c: the game is drawing, so its window is a picture and not a dialogue
 static void pace_frame(void) {
+    bmaa_frame_seen();
     static double hz = -1; static uint64_t last;
     if (hz < 0) hz = getenv("BMAA_PACE_HZ") ? atof(getenv("BMAA_PACE_HZ")) : 60;
     if (hz <= 0) return;

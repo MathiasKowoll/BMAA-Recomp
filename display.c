@@ -124,11 +124,16 @@ static int mouse_wants_held, mouse_is_held, mouse_is_hidden; static _Atomic int 
 void bmaa_mouse_apply(void);
 void bmaa_pad_used(void) { if (!pad_in_use) { pad_in_use = 1; bmaa_mouse_apply(); } }
 void bmaa_mouse_moved(void) { if (pad_in_use) { pad_in_use = 0; bmaa_mouse_apply(); } }
+static _Atomic uint64_t frame_at; static int over_game;
+void bmaa_frame_seen(void) { frame_at = clock_gettime_nsec_np(CLOCK_MONOTONIC); }   // glx.c, once a frame
+void bmaa_mouse_over(int over) { over_game = over; bmaa_mouse_apply(); }
 void bmaa_mouse_warped(void) { warped_at = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (!mouse_is_hidden) bmaa_mouse_apply(); }
 void bmaa_mouse_apply(void) {
     int front = really_front();
     int hold = (mouse_wants_held || pad_in_use) && front;
-    int hide = hold || (front && warped_at && clock_gettime_nsec_np(CLOCK_MONOTONIC) - warped_at < 500000000ull);
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    int hide = hold || (front && warped_at && now - warped_at < 500000000ull)
+                    || (front && over_game && frame_at && now - frame_at < 1000000000ull);
     if (hold != mouse_is_held) { mouse_is_held = hold; CGAssociateMouseAndMouseCursorPosition(!hold); }
     if (hide == mouse_is_hidden) return;
     mouse_is_hidden = hide;
