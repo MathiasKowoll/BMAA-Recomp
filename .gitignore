@@ -16,3 +16,4 @@ win.txt
 .DS_Store
 run*.out
 verbose-img.txt
+dr-run.prev.log

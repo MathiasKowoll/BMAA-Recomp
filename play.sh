@@ -8,5 +8,8 @@ export DR_DIALOGO=${DR_DIALOGO:-1} SteamAppId=35140 SteamGameId=35140 BMAA_AUTOP
 # A C++ exception the game throws is noted in the log with its type and where it came from (a few lines at most in a
 # session that goes well): the game ended on one after ten minutes of play and the log could not say which.
 export RT32_LOG_EH=${RT32_LOG_EH-1}
+# What the game writes (its settings, its caches) is kept from one session to the next, in a folder of the port's:
+# the game's own folders are not written to. The saved games do not go there: the game gives them to Steam.
+export BMAA_WRITE_DIR="${BMAA_WRITE_DIR-$HOME/Library/Application Support/BMAA-Recomp/files}"
 export DR_ARGS="${DR_ARGS-}" LAUNCHER=1
 exec ./dr-try.sh 1000000

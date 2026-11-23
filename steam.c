@@ -91,6 +91,21 @@ static const Sig SIGS[] = {
     {I_USERSTATS, 0, "RequestCurrentStats", "b:"},
     {I_USERSTATS, 10, "StoreStats", "b:"},
     {I_FRIENDS, 0, "GetPersonaName", "s:"},
+    // The saved games: the game keeps them in Steam's cloud storage (profile.bin, Save0.sgd) and nowhere else, so
+    // these are what makes a game continue, and what Steam then synchronises. (ISteamRemoteStorage 012.)
+    {I_REMOTESTORAGE, 0, "FileWrite", "b:ppi"},
+    {I_REMOTESTORAGE, 1, "FileRead", "i:ppi"},
+    {I_REMOTESTORAGE, 2, "FileForget", "b:p"},
+    {I_REMOTESTORAGE, 3, "FileDelete", "b:p"},
+    {I_REMOTESTORAGE, 10, "FileExists", "b:p"},
+    {I_REMOTESTORAGE, 11, "FilePersisted", "b:p"},
+    {I_REMOTESTORAGE, 12, "GetFileSize", "i:p"},
+    {I_REMOTESTORAGE, 13, "GetFileTimestamp", "q:p"},
+    {I_REMOTESTORAGE, 15, "GetFileCount", "i:"},
+    {I_REMOTESTORAGE, 16, "GetFileNameAndSize", "s:ip"},
+    {I_REMOTESTORAGE, 17, "GetQuota", "b:pp"},
+    {I_REMOTESTORAGE, 18, "IsCloudEnabledForAccount", "b:"},
+    {I_REMOTESTORAGE, 19, "IsCloudEnabledForApp", "b:"},
 };
 static const Sig *sig_of(int iface, int slot) {
     for (unsigned k = 0; k < sizeof SIGS / sizeof *SIGS; k++) if (SIGS[k].iface == iface && SIGS[k].slot == slot) return &SIGS[k];

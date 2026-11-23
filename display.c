@@ -10,6 +10,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <OpenGL/OpenGL.h>
 #include <stdlib.h>
+#include <time.h>
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 void aot_lock(void);
@@ -90,8 +91,21 @@ void I__CGEventSourceKeyState(CPU *c) {
     if (bg && !really_front()) { RET(0); return; }
     RET(CGEventSourceKeyState((CGEventSourceStateID)ARG(0), (CGKeyCode)ARG(1)) ? 1 : 0);
 }
-void I__CGSetLocalEventsSuppressionInterval(CPU *c) { RET(0); }   // (double seconds): nothing is suppressed after a warp nowadays
+// (double seconds): after a warp the system holds the mouse's movement back for a quarter of a second unless told
+// otherwise. A game that warps the pointer to the middle on every frame would then never see the mouse move, so
+// what it asks for is passed on.
+void I__CGSetLocalEventsSuppressionInterval(CPU *c) {
+    double s = ARGD(0);
+    if (getenv("BMAA_TRACE_MOUSE")) fprintf(stderr, "  [mouse] the game sets the pause after a warp to %g s\n", s);
+    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+    if (src) { CGEventSourceSetLocalEventsSuppressionInterval(src, s); CFRelease(src); }
+    RET(0);
+}
+void bmaa_mouse_warped(void);
 void I__CGWarpMouseCursorPosition(CPU *c) {   // (CGPoint: two floats)
+    static unsigned n;
+    if (getenv("BMAA_TRACE_MOUSE") && (n++ < 5 || n % 600 == 0)) fprintf(stderr, "  [mouse] warp %u to %g,%g (in front: %d)\n", n, ARGF(0), ARGF(1), really_front());
+    if (really_front()) bmaa_mouse_warped();
     RET(really_front() ? CGWarpMouseCursorPosition(CGPointMake(ARGF(0), ARGF(1))) : 0);
 }
 // The game holds the pointer while it is played (the mouse then only turns the camera) and lets it go for its menus:
@@ -103,17 +117,23 @@ void I__CGWarpMouseCursorPosition(CPU *c) {   // (CGPoint: two floats)
 // original, drew its own empty cursor image, which the bridge does not carry), so the system's arrow sat over the
 // picture and a nudge of the mouse could click outside the game. Moving the mouse gives the pointer back, for the
 // menus; the next press on the pad takes it again.
-static int mouse_wants_held, mouse_is_held; static _Atomic int pad_in_use;
+// Played with the mouse, the game does neither: it puts the pointer back in the middle on every frame and, in the
+// original, hid it behind the same empty image. So a pointer that is being put back is hidden too, and shown again
+// half a second after the game stops (its menus, where the pointer is the game's to use).
+static int mouse_wants_held, mouse_is_held, mouse_is_hidden; static _Atomic int pad_in_use; static _Atomic uint64_t warped_at;
 void bmaa_mouse_apply(void);
 void bmaa_pad_used(void) { if (!pad_in_use) { pad_in_use = 1; bmaa_mouse_apply(); } }
 void bmaa_mouse_moved(void) { if (pad_in_use) { pad_in_use = 0; bmaa_mouse_apply(); } }
+void bmaa_mouse_warped(void) { warped_at = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (!mouse_is_hidden) bmaa_mouse_apply(); }
 void bmaa_mouse_apply(void) {
-    int hold = (mouse_wants_held || pad_in_use) && really_front();
-    if (hold == mouse_is_held) return;
-    mouse_is_held = hold;
-    CGAssociateMouseAndMouseCursorPosition(!hold);
-    if (hold) CGDisplayHideCursor(CGMainDisplayID()); else CGDisplayShowCursor(CGMainDisplayID());
-    if (getenv("BMAA_TRACE_MOUSE")) fprintf(stderr, "  [mouse] the pointer is %s\n", hold ? "held and hidden" : "free and shown");
+    int front = really_front();
+    int hold = (mouse_wants_held || pad_in_use) && front;
+    int hide = hold || (front && warped_at && clock_gettime_nsec_np(CLOCK_MONOTONIC) - warped_at < 500000000ull);
+    if (hold != mouse_is_held) { mouse_is_held = hold; CGAssociateMouseAndMouseCursorPosition(!hold); }
+    if (hide == mouse_is_hidden) return;
+    mouse_is_hidden = hide;
+    if (hide) CGDisplayHideCursor(CGMainDisplayID()); else CGDisplayShowCursor(CGMainDisplayID());
+    if (getenv("BMAA_TRACE_MOUSE")) fprintf(stderr, "  [mouse] the pointer is %s and %s\n", hold ? "held" : "free", hide ? "hidden" : "shown");
 }
 void I__CGAssociateMouseAndMouseCursorPosition(CPU *c) {
     mouse_wants_held = ARG(0) == 0;

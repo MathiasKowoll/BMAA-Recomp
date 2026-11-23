@@ -3,7 +3,9 @@
 # for at most $1 seconds (default 100). The log goes to dr-run.log.
 cd "$(dirname "$0")"
 D="$(cd "$(dirname "$(readlink orig.bin)")/../../.." && pwd)"
-J="$(mktemp -d "${TMPDIR:-/tmp}/bmaa-jaula.XXXXXX")"
+# BMAA_WRITE_DIR: a folder that is kept, in place of the empty jail (play.sh sets it: the game's settings stay).
+if [ -n "$BMAA_WRITE_DIR" ]; then J="$BMAA_WRITE_DIR"; mkdir -p "$J"; KEEP_JAIL=1
+else J="$(mktemp -d "${TMPDIR:-/tmp}/bmaa-jaula.XXXXXX")"; fi
 # SKIP_LAUNCHER=1: a copy of the game's preferences with GameOptionsDialogShouldShow off goes into the write jail,
 # which the game reads before the real file (the real one is not touched). NOT ENOUGH YET: the launcher still shows,
 # so that key is read from somewhere else (see notes). Kept as the place to finish it.
@@ -19,6 +21,8 @@ t = t.replace('<key name="Setup">', '<key name="Setup">\n                       
 open(dst, 'w').write(t)
 PY
 fi
+# The log of the session before is kept: a game that ended badly is usually started again before anyone reads it.
+[ -s dr-run.log ] && mv -f dr-run.log dr-run.prev.log
 FERAL_RUNTIME_DATA_FOLDER="$D" ${DR_BIN:-./build/dr-bmaa} --entry --window "${WINDOW:-100000}" --init ${GLMODE:---gl-host} --limit 8000000000 \
     --escritura "$J" "$(readlink orig.bin)" > dr-run.log 2>&1 &
 pid=$!; n=0

@@ -3,6 +3,7 @@
 // counted where the game presents a frame (CGLFlushDrawable) and refreshed twice a second from the main queue.
 // The same moment hides the bridge's own empty window ("DecompRecomp - ..."), which the game never draws in.
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 #include <stdatomic.h>
 #include <time.h>
 
@@ -13,7 +14,12 @@ static NSPanel *panel; static NSTextField *label;
 // the game takes to load it sat on screen, empty. It is put away the moment it shows.
 void bmaa_mouse_apply(void);   // display.c: the pointer is held only while this application is in front
 void bmaa_mouse_moved(void);   // and given back when the mouse itself is moved
+// A key pressed in the game sounded the system's alert, as when typing where nothing takes the text: the game reads
+// its keys from the system's state, so the key's event finds no one to take it and AppKit beeps. Nothing in this
+// program wants that beep.
+static void no_beep(id self, SEL cmd, SEL event) { (void)self; (void)cmd; (void)event; }
 __attribute__((constructor)) static void hide_bridge_window(void) {
+    class_replaceMethod([NSResponder class], @selector(noResponderFor:), (IMP)no_beep, "v@::");
     // The mouse being moved, seen from the system's count of its events (a held pointer does not move, and this
     // needs no permission): four times a second, and more than a tremor's worth.
     static dispatch_source_t mt;
@@ -23,6 +29,7 @@ __attribute__((constructor)) static void hide_bridge_window(void) {
         static uint32_t last; uint32_t n = CGEventSourceCounterForEventType(kCGEventSourceStateHIDSystemState, kCGEventMouseMoved);
         if (last && n - last > 6) bmaa_mouse_moved();
         last = n;
+        bmaa_mouse_apply();   // a pointer the game has stopped putting back is shown again
     });
     dispatch_resume(mt);
     for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification])
