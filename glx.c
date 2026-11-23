@@ -402,7 +402,56 @@ static void pace_frame(void) {
         last += period;
     } else last = now;
 }
-void I__CGLFlushDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable"); if (x) { gl_count_frame(); gl_error_census(); dump_frame(); fps_frame(); frame_sleep(); pace_frame(); } RET(x ? CGLFlushDrawable(x) : kCGLBadContext); }
+// The frames that took too long, written down: ~/Library/Application Support/BMAA-Recomp/hitches.log (BMAA_HITCH_LOG
+// names another file, an empty value turns it off). A frame counts when it took more than 25 ms and more than 1.6
+// times what frames have been taking, so a scene the game holds at 30 a second is not a list of hitches. Each line
+// says when, how long, and what happened inside it that is known to stall: shaders compiled, programs linked,
+// assembly programs loaded (with the time those calls took on this thread) and how long the flush itself took.
+static struct { _Atomic unsigned n_compile, n_link, n_asm; _Atomic uint64_t t_compile, t_link, t_asm, t_flush; } hw;
+static void hitch_frame(void) {
+    static FILE *f; static int off = -1; static uint64_t t0, last; static double usual; static unsigned long frame, hitches;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (off < 0) {
+        const char *e = getenv("BMAA_HITCH_LOG"); char path[1024];
+        off = e && !*e;
+        if (!off) {
+            if (e) snprintf(path, sizeof path, "%s", e);
+            else snprintf(path, sizeof path, "%s/Library/Application Support/BMAA-Recomp/hitches.log", getenv("HOME") ? getenv("HOME") : "");
+            f = fopen(path, "a");
+            if (f) { time_t t = time(NULL); char d[64]; strftime(d, sizeof d, "%Y-%m-%d %H:%M:%S", localtime(&t)); fprintf(f, "== session of %s\n", d); fflush(f); }
+            else off = 1;
+        }
+        t0 = now;
+    }
+    frame++;
+    unsigned nc = atomic_exchange(&hw.n_compile, 0), nl = atomic_exchange(&hw.n_link, 0), na = atomic_exchange(&hw.n_asm, 0);
+    uint64_t tc = atomic_exchange(&hw.t_compile, 0), tl = atomic_exchange(&hw.t_link, 0), ta = atomic_exchange(&hw.t_asm, 0), tf = atomic_exchange(&hw.t_flush, 0);
+    if (last && !off) {
+        double ms = (now - last) / 1e6;
+        if (usual == 0) usual = ms;
+        if (ms > 25 && ms > 1.6 * usual && frame > 120) {
+            hitches++;
+            fprintf(f, "t=%.1fs frame %lu took %.1f ms (usual %.1f): shaders compiled %u (%.1f ms), programs linked %u (%.1f ms), asm programs %u (%.1f ms), flush %.1f ms\n",
+                    (now - t0) / 1e9, frame, ms, usual, nc, tc / 1e6, nl, tl / 1e6, na, ta / 1e6, tf / 1e6);
+            fflush(f);
+        }
+        usual += ((ms > 3 * usual ? 3 * usual : ms) - usual) * 0.05;
+        if (frame % 3600 == 0) { fprintf(f, "t=%.1fs: %lu frames so far, %lu of them long, usual frame %.1f ms\n", (now - t0) / 1e9, frame, hitches, usual); fflush(f); }
+    }
+    last = now;
+}
+#define HITCH_TIMED(n_, t_, call) do { uint64_t a_ = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); call; hw.n_++; hw.t_ += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - a_; } while (0)
+void I__glCompileShader(CPU *c) { gl_trace("glCompileShader"); HITCH_TIMED(n_compile, t_compile, glCompileShader(ARG(0))); }
+void I__glLinkProgram(CPU *c) { gl_trace("glLinkProgram"); HITCH_TIMED(n_link, t_link, glLinkProgram(ARG(0))); }
+void I__glProgramStringARB(CPU *c) { gl_trace("glProgramStringARB"); HITCH_TIMED(n_asm, t_asm, glProgramStringARB(ARG(0), ARG(1), (GLsizei)ARG(2), ARG(3) ? G2H(ARG(3)) : NULL)); }
+void I__CGLFlushDrawable(CPU *c) {
+    CGLContextObj x = host(ARG(0)); gl_trace("CGLFlushDrawable");
+    if (!x) { RET(kCGLBadContext); return; }
+    gl_count_frame(); gl_error_census(); dump_frame(); fps_frame(); frame_sleep(); hitch_frame(); pace_frame();
+    uint64_t a = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    RET(CGLFlushDrawable(x));
+    hw.t_flush += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - a;
+}
 void I__CGLClearDrawable(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? CGLClearDrawable(x) : kCGLBadContext); }
 void I__CGLGetShareGroup(CPU *c) { CGLContextObj x = host(ARG(0)); RET(x ? handle(CGLGetShareGroup(x)) : 0); }
 void I__CGLQueryRendererInfo(CPU *c) {
